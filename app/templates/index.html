@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}JKLC Reports Dashboard{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>JKLC Reports Dashboard</h1>
+  <p class="lede">Pick a report, upload the input files, and download the generated output.</p>
+
+  <form id="report-picker" class="picker-form">
+    <label for="report-select">Report</label>
+    <div class="picker-row">
+      <select id="report-select" name="report_id">
+        {% for report in reports %}
+        <option value="{{ report.id }}">{{ report.name }}{% if not report.implemented %} (not yet implemented){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Open</button>
+    </div>
+  </form>
+</section>
+
+<section class="overview">
+  <div class="overview-header">
+    <h2>All reports</h2>
+    <a class="settings-link" href="/settings">Manage reports &rarr;</a>
+  </div>
+  <div class="report-grid">
+    {% for report in reports %}
+    <a class="report-card" href="/report/{{ report.id }}">
+      <div class="report-card-top">
+        <span class="report-card-name">{{ report.name }}</span>
+        {% if report.implemented %}
+        <span class="badge badge-ready">Ready</span>
+        {% else %}
+        <span class="badge badge-stub">Stub</span>
+        {% endif %}
+      </div>
+      <ul class="input-list">
+        {% for slot in report.input_slots %}
+        <li>{{ slot.label }}</li>
+        {% endfor %}
+      </ul>
+      <div class="report-card-output"><code>{{ report.output_pattern }}</code></div>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+
+<script>
+  document.getElementById('report-picker').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var id = document.getElementById('report-select').value;
+    window.location.href = '/report/' + id;
+  });
+</script>
+{% endblock %}

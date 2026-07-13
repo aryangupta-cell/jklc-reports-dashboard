@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{% if report %}{{ report.name }}{% else %}Report not found{% endif %}{% endblock %}
+{% block content %}
+<p class="back-link"><a href="/">&larr; All reports</a></p>
+
+{% if not report %}
+  <p class="error">{{ error }}</p>
+{% else %}
+<div class="report-page">
+  <h1>{{ report.name }}</h1>
+  {% if report.notes %}<p class="notes">{{ report.notes }}</p>{% endif %}
+
+  {% if not report.implemented %}
+    <p class="badge badge-stub badge-block">Not yet implemented &mdash; the form below works, but processing will report that the logic isn't wired in yet.</p>
+  {% endif %}
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  <!--
+    On success this form's POST gets the generated file back directly
+    (Content-Disposition: attachment) — the browser downloads it and stays
+    on this page without navigating away, so there's no separate "download
+    ready" link/state to render here. On error, the server re-renders this
+    same page with the `error` banner above.
+  -->
+  <form method="post" action="/report/{{ report.id }}/generate" enctype="multipart/form-data" class="report-form">
+    {% for slot in report.input_slots %}
+    <div class="form-row">
+      <label for="{{ slot.key }}">{{ slot.label }}</label>
+      <input type="file" id="{{ slot.key }}" name="{{ slot.key }}" accept="{{ slot.accept }}" required>
+      {% if slot.hint %}<p class="hint">e.g. <code>{{ slot.hint }}</code></p>{% endif %}
+    </div>
+    {% endfor %}
+
+    {% if report.date_mode == "range" %}
+    <div class="form-row form-row-dates">
+      <div>
+        <label for="start_date">Start date</label>
+        <input type="date" id="start_date" name="start_date" required>
+      </div>
+      <div>
+        <label for="end_date">End date</label>
+        <input type="date" id="end_date" name="end_date" required>
+      </div>
+    </div>
+    {% elif report.date_mode == "single" %}
+    <div class="form-row">
+      <label for="report_date">Report date</label>
+      <input type="date" id="report_date" name="report_date" required>
+    </div>
+    {% endif %}
+
+    <button type="submit">Generate report</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
