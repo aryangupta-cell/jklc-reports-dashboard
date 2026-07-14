@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 
 from reports.errors import ReportProcessingError
@@ -259,34 +260,42 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 # Format utilities for Excel output (matching the real master file exactly)
 # ---------------------------------------------------------------------------
 
-def _style_mtr_headers(ws, n_cols: int, bold: bool = False):
-    """Style header row 1 of an MTR/20KM sheet. Data already written by pandas."""
-    header_font = Font(name="Calibri", size=11, bold=bold)
-    center_align = Alignment(horizontal="center", vertical="center")
-    for col_idx in range(1, n_cols + 1):
-        cell = ws.cell(1, col_idx)
+HEADER_FONT = Font(name="Calibri", size=11, bold=False)
+HEADER_FONT_BOLD = Font(name="Calibri", size=11, bold=True)
+DATA_FONT = Font(name="Calibri", size=11)
+CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
+
+
+def _write_bulk_sheet(wb, sheet_name: str, df: pd.DataFrame, bold_header: bool = False,
+                      row_offset: int = 0, col_offset: int = 0):
+    """Write a DataFrame into a new sheet using ws.append (fast row-at-a-time
+    bulk write) instead of pandas' ExcelWriter + a second openpyxl reload --
+    that double round-trip was the actual cause of the Render 502 (measured
+    68s to write 4 plant files locally; Render's shared CPU is slower still
+    and was tripping the platform's ~100s request timeout).
+    """
+    ws = wb.create_sheet(sheet_name)
+    header_font = HEADER_FONT_BOLD if bold_header else HEADER_FONT
+
+    if row_offset or col_offset:
+        for col_idx, col_name in enumerate(df.columns):
+            cell = ws.cell(1 + row_offset, 1 + col_offset + col_idx, value=col_name)
+            cell.font = header_font
+            cell.alignment = CENTER_ALIGN
+        for row_idx, row in enumerate(df.itertuples(index=False), start=1):
+            for col_idx, value in enumerate(row):
+                cell = ws.cell(1 + row_offset + row_idx, 1 + col_offset + col_idx, value=value)
+                cell.font = DATA_FONT
+                cell.alignment = CENTER_ALIGN
+        return ws
+
+    ws.append(list(df.columns))
+    for cell in ws[1]:
         cell.font = header_font
-        cell.alignment = center_align
-
-
-def _write_summary_sheet(ws, df: pd.DataFrame):
-    """Write Summary sheet: headers at row 3 cols C-Q, data from row 4, Calibri 11 centered."""
-    header_font = Font(name="Calibri", size=11, bold=False)
-    data_font = Font(name="Calibri", size=11)
-    center_align = Alignment(horizontal="center", vertical="center")
-
-    for col_offset, col_name in enumerate(df.columns):
-        col_idx = 3 + col_offset  # Column C = 3
-        cell = ws.cell(3, col_idx, value=col_name)
-        cell.font = header_font
-        cell.alignment = center_align
-
-    for row_idx, (_, row) in enumerate(df.iterrows(), start=4):
-        for col_offset, value in enumerate(row):
-            col_idx = 3 + col_offset
-            cell = ws.cell(row_idx, col_idx, value=value)
-            cell.font = data_font
-            cell.alignment = center_align
+        cell.alignment = CENTER_ALIGN
+    for row in df.itertuples(index=False):
+        ws.append(row)
+    return ws
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +305,13 @@ def _write_summary_sheet(ws, df: pd.DataFrame):
 def _write_plant_outputs_zip(summary: pd.DataFrame, mtr_clean: pd.DataFrame,
                              candidates_20km: pd.DataFrame, date_label: str,
                              output_dir: Path) -> Path:
-    """Write 4 plant-wise Excel files, each with 3 tabs (MTR, 20 KM, Summary)."""
-    # Drop internal helper columns before writing
+    """Write 4 plant-wise Excel files, each with 3 tabs (MTR, 20 KM, Summary).
+
+    Each tab is filtered to that plant's own rows (via Org Location / Plant
+    Name) -- not the full unfiltered dataset -- both because that's the
+    point of a "per-plant report" and because writing the full ~25k-row MTR
+    table into all 4 files (100k+ rows total) was needlessly slow.
+    """
     mtr_write = mtr_clean.drop(columns=["_inv_dt"], errors="ignore")
     km20_write = candidates_20km.drop(columns=["_inv_dt", "_proximity_start"], errors="ignore")
 
@@ -307,36 +321,22 @@ def _write_plant_outputs_zip(summary: pd.DataFrame, mtr_clean: pd.DataFrame,
         plant_short = plant.replace("JKLC ", "")
         xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
 
-        plant_summary = summary[summary["Plant Name"] == plant].copy()
+        plant_mtr = mtr_write[mtr_write["Org Location"] == plant]
+        plant_20km = km20_write[km20_write["Org Location"] == plant]
+        plant_summary = summary[summary["Plant Name"] == plant]
 
-        # Use pandas ExcelWriter (fast bulk write) for MTR and 20 KM tabs.
-        # Summary is small enough to write cell-by-cell for exact positioning
-        # (headers at row 3, col C — not row 1, col A like pandas does).
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-            mtr_write.to_excel(writer, sheet_name="MTR", index=False)
-            km20_write.to_excel(writer, sheet_name="20 KM", index=False)
-            # Summary written as empty placeholder; real write happens below
-            pd.DataFrame().to_excel(writer, sheet_name="Summary", index=False)
+        wb = Workbook()
+        wb.remove(wb.active)  # drop the default blank sheet
 
-        # Re-open to apply formatting on headers and write Summary correctly
-        from openpyxl import load_workbook as _lw
-        wb = _lw(xlsx_path)
-
-        _style_mtr_headers(wb["MTR"], len(mtr_write.columns), bold=True)
-        _style_mtr_headers(wb["20 KM"], len(km20_write.columns), bold=False)
-
-        # Clear the placeholder Summary sheet and write it properly
-        del wb["Summary"]
-        ws_summary = wb.create_sheet("Summary")
-        _write_summary_sheet(ws_summary, plant_summary)
-
-        # Reorder sheets: MTR, 20 KM, Summary
-        wb._sheets.sort(key=lambda s: ["MTR", "20 KM", "Summary"].index(s.title)
-                        if s.title in ["MTR", "20 KM", "Summary"] else 99)
+        _write_bulk_sheet(wb, "MTR", plant_mtr, bold_header=True)
+        _write_bulk_sheet(wb, "20 KM", plant_20km, bold_header=False)
+        # Summary matches the real master file: headers at row 3, col C.
+        _write_bulk_sheet(wb, "Summary", plant_summary, bold_header=False,
+                          row_offset=2, col_offset=2)
 
         wb.save(xlsx_path)
         log.info("%s: MTR %d rows, 20KM %d rows, Summary %d rows -> %s",
-                 plant, len(mtr_write), len(km20_write), len(plant_summary), xlsx_path.name)
+                 plant, len(plant_mtr), len(plant_20km), len(plant_summary), xlsx_path.name)
         xlsx_paths.append(xlsx_path)
 
     zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
