@@ -33,9 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment
 
 from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
@@ -261,56 +259,34 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 # Format utilities for Excel output (matching the real master file exactly)
 # ---------------------------------------------------------------------------
 
-def _apply_mtr_formatting(ws, df: pd.DataFrame):
-    """Apply formatting to MTR or 20 KM sheet: headers bold, Calibri 11, data rows normal."""
-    # Header row (row 1) — bold, Calibri 11
-    header_font = Font(name="Calibri", size=11, bold=True)
-    data_font = Font(name="Calibri", size=11)
-    center_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
-
-    # Write headers (row 1)
-    for col_idx, col_name in enumerate(df.columns, start=1):
-        cell = ws.cell(1, col_idx, value=col_name)
+def _style_mtr_headers(ws, n_cols: int, bold: bool = False):
+    """Style header row 1 of an MTR/20KM sheet. Data already written by pandas."""
+    header_font = Font(name="Calibri", size=11, bold=bold)
+    center_align = Alignment(horizontal="center", vertical="center")
+    for col_idx in range(1, n_cols + 1):
+        cell = ws.cell(1, col_idx)
         cell.font = header_font
         cell.alignment = center_align
 
-    # Write data rows (starting row 2)
-    for row_idx, (_, row) in enumerate(df.iterrows(), start=2):
-        for col_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row_idx, col_idx, value=value)
-            cell.font = data_font
-            # Format datetime columns
-            if hasattr(value, "strftime"):
-                cell.number_format = "yyyy-mm-dd hh:mm:ss"
-            elif isinstance(value, (int, float)):
-                cell.number_format = "General"
 
-
-def _apply_summary_formatting(ws, df: pd.DataFrame):
-    """Apply formatting to Summary sheet: headers at row 3 (cols C-Q), Calibri 11, centered."""
+def _write_summary_sheet(ws, df: pd.DataFrame):
+    """Write Summary sheet: headers at row 3 cols C-Q, data from row 4, Calibri 11 centered."""
     header_font = Font(name="Calibri", size=11, bold=False)
     data_font = Font(name="Calibri", size=11)
-    center_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    center_align = Alignment(horizontal="center", vertical="center")
 
-    # Write headers at row 3, starting column C (col 3)
     for col_offset, col_name in enumerate(df.columns):
-        col_idx = 3 + col_offset  # Start at column C (column 3)
+        col_idx = 3 + col_offset  # Column C = 3
         cell = ws.cell(3, col_idx, value=col_name)
         cell.font = header_font
         cell.alignment = center_align
 
-    # Write data rows (starting row 4)
     for row_idx, (_, row) in enumerate(df.iterrows(), start=4):
         for col_offset, value in enumerate(row):
             col_idx = 3 + col_offset
             cell = ws.cell(row_idx, col_idx, value=value)
             cell.font = data_font
             cell.alignment = center_align
-            # Format datetime columns
-            if hasattr(value, "strftime"):
-                cell.number_format = "yyyy-mm-dd hh:mm:ss"
-            elif isinstance(value, float):
-                cell.number_format = "0.00"
 
 
 # ---------------------------------------------------------------------------
@@ -321,35 +297,47 @@ def _write_plant_outputs_zip(summary: pd.DataFrame, mtr_clean: pd.DataFrame,
                              candidates_20km: pd.DataFrame, date_label: str,
                              output_dir: Path) -> Path:
     """Write 4 plant-wise Excel files, each with 3 tabs (MTR, 20 KM, Summary)."""
+    # Drop internal helper columns before writing
+    mtr_write = mtr_clean.drop(columns=["_inv_dt"], errors="ignore")
+    km20_write = candidates_20km.drop(columns=["_inv_dt", "_proximity_start"], errors="ignore")
+
     xlsx_paths = []
 
     for plant in ORG_LOCATIONS_ALL:
         plant_short = plant.replace("JKLC ", "")
         xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
 
-        # Create workbook with 3 sheets
-        wb = Workbook()
-        wb.remove(wb.active)  # Remove default sheet
-
-        # Sheet 1: MTR (all rows, all columns, unfiltered)
-        ws_mtr = wb.create_sheet("MTR", 0)
-        _apply_mtr_formatting(ws_mtr, mtr_clean)
-        log.info("  MTR sheet: %d rows", len(mtr_clean))
-
-        # Sheet 2: 20 KM (filtered candidates, same columns as MTR)
-        ws_20km = wb.create_sheet("20 KM", 1)
-        _apply_mtr_formatting(ws_20km, candidates_20km)
-        log.info("  20 KM sheet: %d rows", len(candidates_20km))
-
-        # Sheet 3: Summary (plant-specific, 15 columns)
         plant_summary = summary[summary["Plant Name"] == plant].copy()
-        ws_summary = wb.create_sheet("Summary", 2)
-        _apply_summary_formatting(ws_summary, plant_summary)
-        log.info("  Summary sheet: %d rows", len(plant_summary))
+
+        # Use pandas ExcelWriter (fast bulk write) for MTR and 20 KM tabs.
+        # Summary is small enough to write cell-by-cell for exact positioning
+        # (headers at row 3, col C — not row 1, col A like pandas does).
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            mtr_write.to_excel(writer, sheet_name="MTR", index=False)
+            km20_write.to_excel(writer, sheet_name="20 KM", index=False)
+            # Summary written as empty placeholder; real write happens below
+            pd.DataFrame().to_excel(writer, sheet_name="Summary", index=False)
+
+        # Re-open to apply formatting on headers and write Summary correctly
+        from openpyxl import load_workbook as _lw
+        wb = _lw(xlsx_path)
+
+        _style_mtr_headers(wb["MTR"], len(mtr_write.columns), bold=True)
+        _style_mtr_headers(wb["20 KM"], len(km20_write.columns), bold=False)
+
+        # Clear the placeholder Summary sheet and write it properly
+        del wb["Summary"]
+        ws_summary = wb.create_sheet("Summary")
+        _write_summary_sheet(ws_summary, plant_summary)
+
+        # Reorder sheets: MTR, 20 KM, Summary
+        wb._sheets.sort(key=lambda s: ["MTR", "20 KM", "Summary"].index(s.title)
+                        if s.title in ["MTR", "20 KM", "Summary"] else 99)
 
         wb.save(xlsx_path)
+        log.info("%s: MTR %d rows, 20KM %d rows, Summary %d rows -> %s",
+                 plant, len(mtr_write), len(km20_write), len(plant_summary), xlsx_path.name)
         xlsx_paths.append(xlsx_path)
-        log.info("%s: 3 sheets -> %s", plant, xlsx_path.name)
 
     zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
