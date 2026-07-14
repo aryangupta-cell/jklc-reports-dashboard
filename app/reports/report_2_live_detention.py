@@ -78,7 +78,12 @@ SUMMARY_COLUMNS = [
 def _compute_date_window(report_date_str: str):
     """Confirmed: 1st of REPORT_DATE's month -> REPORT_DATE itself, NO -3
     day trim (different rule from Report 1). Confirmed both by the SOP text
-    and the user's own reference table ("Current Month (1 to today)")."""
+    and the user's own reference table ("Current Month (1 to today)").
+
+    Kept but NOT called from process() below — per explicit instruction, the
+    UI takes a manual start/end range instead (consistent with Report 1),
+    so this auto-compute isn't used as the default. Left in place in case a
+    "suggest dates" convenience feature is wanted later."""
     report_date = pd.to_datetime(report_date_str)
     start = report_date.replace(day=1)
     end = report_date
@@ -240,18 +245,18 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 # Split into 4 plant-wise files, zip them for a single download
 # ---------------------------------------------------------------------------
 
-def _write_plant_outputs_zip(summary: pd.DataFrame, report_date: str, output_dir: Path) -> Path:
+def _write_plant_outputs_zip(summary: pd.DataFrame, date_label: str, output_dir: Path) -> Path:
     xlsx_paths = []
     for plant in ORG_LOCATIONS_ALL:
         plant_df = summary[summary["Plant Name"] == plant]
         plant_short = plant.replace("JKLC ", "")
-        xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{report_date}.xlsx"
+        xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             plant_df.to_excel(writer, sheet_name="Summary", index=False)
         xlsx_paths.append(xlsx_path)
         log.info("%s: %d rows -> %s", plant, len(plant_df), xlsx_path.name)
 
-    zip_path = output_dir / f"JKLC_Live_Detention_{report_date}.zip"
+    zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in xlsx_paths:
             zf.write(p, arcname=p.name)
@@ -267,9 +272,13 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     dispatch_path = input_files["dispatch"]
     bot_path = input_files["detention_bot"]
 
-    report_date = dates["report_date"]
-    start_date, end_date = _compute_date_window(report_date)
-    log.info("Processing JKLC Live Detention for %s (window %s to %s)", report_date, start_date, end_date)
+    # Manual start/end range, per explicit instruction (consistent with
+    # Report 1) — NOT run through _compute_date_window(), which is kept but
+    # unused (see that function's docstring for the confirmed "1st of month
+    # to report date" rule it implements).
+    start_date = dates["start_date"]
+    end_date = dates["end_date"]
+    log.info("Processing JKLC Live Detention for window %s to %s", start_date, end_date)
 
     mtr_raw = _read_any(mtr_path)
     dispatch_raw = _read_any(dispatch_path)
@@ -299,7 +308,8 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     summary = build_summary(merged)
     log.info("Final Summary rows: %d (%s)", len(summary), dict(summary["Plant Name"].value_counts()))
 
-    return _write_plant_outputs_zip(summary, report_date, output_dir)
+    date_label = f"{start_date}_to_{end_date}"
+    return _write_plant_outputs_zip(summary, date_label, output_dir)
 
 
 register(
@@ -326,10 +336,10 @@ register(
                 hint="bot output 13 detention_results.csv",
             ),
         ],
-        output_pattern="JKLC_Live_Detention_<date>.zip (4 plant .xlsx files inside)",
+        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files inside)",
         process_fn=process,
         implemented=True,
-        date_mode="single",
+        date_mode="range",
         notes=(
             "Step 5 date/end-time filter revised 14 July 2026 (validated against real "
             "13 July data). Bot-remark filter (SUMMARY_INCLUDE_REMARKS) still unconfirmed. "
