@@ -1,22 +1,340 @@
-from reports._stub_helpers import not_implemented_process
+"""
+JKLC Live Detention — web app adaptation (Report 2 of 9)
+==========================================================
+
+Adapted from the provided `jklc_live_detention.py` script. Per instructions,
+business logic is kept as given EXCEPT for two changes confirmed directly
+with the user on 14 July 2026 (see `build_20km_candidates` below) — those
+are documented inline with the evidence that drove them, not silently
+applied. Everything else (dispatch filter, detention-hour rule, Stamp
+Status filter, bot-remark merge, Summary column mapping) is unchanged.
+
+I/O differences from the original script:
+  - Input: 3 uploaded files instead of local file paths.
+  - Output: 4 plant-wise .xlsx files, zipped into one .zip (the generic
+    upload->process->download route expects a single output path; zipping
+    keeps that route completely generic instead of special-casing this report).
+  - REPORT_DATE comes from the web form (single-date field, matching this
+    report's simpler validated date rule) instead of a module constant.
+"""
+
+import logging
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CONFIG — same values as the original script. Duplicated rather than
+# imported from Report 1 (each report module stays fully self-contained,
+# matching how the original standalone scripts were each independent).
+# ---------------------------------------------------------------------------
+
+MTR_DROP_COLUMNS = [
+    "Probable Unloading Count",
+    "Probable Unloading Detention",
+    "1 Km Geofence Start Time",
+    "1 Km Geofence End Time",
+    "1 Km Geofence Detention",
+    "20 Km Geofence Start Time",
+    "20 Km Geofence End Time",
+    "20 Km Geofence Detention",
+    "40 Km Geofence Start Time",
+    "40 Km Geofence End Time",
+    "40 Km Geofence Detention",
+    "Lap Sharable Link",
+]
+
+ORG_LOCATION_MAP = {
+    "Durg Plant": "JKLC Durg",
+    "Jharli Grinding": "JKLC Jharli",
+    "JK Lakshmi Cement Limited- Surat Grinding Unit": "JKLC Surat",
+    "JK Lakshmi Cement Limited - Surat Grinding Unit": "JKLC Surat",
+    "MS JK LAKSHMI CEMENT LIMITED CUTTACK GRINDING UNIT": "JKLC Cuttack",
+    "M/S JK Lakshmi Cement Limited Cuttack Grinding Unit": "JKLC Cuttack",
+}
+
+ORG_LOCATIONS_ALL = ["JKLC Cuttack", "JKLC Durg", "JKLC Jharli", "JKLC Surat"]
+
+# UNCONFIRMED — see original script's docstring. Which bot remark values
+# count as a real detention worth including in the final Summary. Not part
+# of the 14 July fix; left exactly as the original script had it.
+SUMMARY_INCLUDE_REMARKS = ["Detention", "OUT OF GEOFENCE"]
+
+SUMMARY_COLUMNS = [
+    "Plant Name", "Invoice Number", "Quantity", "Distribution Channel",
+    "Vehicle number", "Transporter", "Ship to Region", "Ship to District",
+    "Unloading Point", "Invoice Date", "Detention Since", "Detention (Hours)",
+    "Ship to Party", "Lead Distance", "Detention Days",
+]
+
+
+def _compute_date_window(report_date_str: str):
+    """Confirmed: 1st of REPORT_DATE's month -> REPORT_DATE itself, NO -3
+    day trim (different rule from Report 1). Confirmed both by the SOP text
+    and the user's own reference table ("Current Month (1 to today)")."""
+    report_date = pd.to_datetime(report_date_str)
+    start = report_date.replace(day=1)
+    end = report_date
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------------
+# File I/O
+# ---------------------------------------------------------------------------
+
+def _read_any(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".csv":
+            return pd.read_csv(path, dtype=str)
+        if suffix in (".xlsx", ".xls"):
+            return pd.read_excel(path, dtype=str)
+    except Exception as exc:
+        raise ReportProcessingError(f"Couldn't read '{path.name}' as a {suffix} file: {exc}") from exc
+    raise ReportProcessingError(f"Unsupported file type '{suffix}' for '{path.name}'. Expected .csv or .xlsx.")
+
+
+# ---------------------------------------------------------------------------
+# Clean MTR (same as Report 1 / the original script — unchanged)
+# ---------------------------------------------------------------------------
+
+def clean_mtr(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    df = df.copy()
+    df = df.drop(columns=[c for c in MTR_DROP_COLUMNS if c in df.columns])
+    df["Org Location"] = df["Org Location"].replace(ORG_LOCATION_MAP)
+
+    df["_inv_dt"] = pd.to_datetime(df["Invoice Date & Time"], errors="coerce")
+    mask = (df["_inv_dt"] >= start_date) & (df["_inv_dt"] <= end_date + " 23:59:59")
+    df = df[mask]
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Step 5: build the "20 KM" candidate sheet
+#
+# CHANGED from the original script — confirmed with the user 14 July 2026,
+# based on direct verification against the real 13 July master output:
+#
+#   Original filter: Mode in {AT FIX, GPS-API}, Lead Distance > 20,
+#   Proximity Start date == REPORT_DATE exactly, Proximity End Time blank.
+#   The original script's docstring called this "CONFIRMED EXACT (173/173)."
+#
+#   Verification against the real file showed that claim was a coincidental
+#   ROW-COUNT match, not a real row-identity match: comparing by Invoice No,
+#   only 2 of 172 real rows actually matched. The other 170 real rows had
+#   Proximity Start dates ranging from 6-12 July (detentions carrying over
+#   across multiple days, not just "started today"), and 29/172 real rows
+#   (17%) had a non-blank Proximity End Time yet were still included.
+#
+#   Revised filter: Proximity Start anywhere within [start_date, end_date]
+#   (no exact-day requirement), End Time condition dropped entirely (Step 7's
+#   Dispatch not-yet-delivered check is the real "still open" signal, not
+#   Proximity End Time). This produces 95% overlap (164/172) with the real
+#   20 KM sheet, up from ~1% with the original literal-SOP filter.
+# ---------------------------------------------------------------------------
+
+def build_20km_candidates(mtr_clean: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    df = mtr_clean.copy()
+    df["Lead Distance"] = pd.to_numeric(df["Lead Distance"], errors="coerce")
+    df["_proximity_start"] = pd.to_datetime(
+        df["System Destination Proximity Start Time"], errors="coerce"
+    )
+
+    mask = (
+        df["Mode"].isin(["AT FIX", "GPS-API"])
+        & (df["Lead Distance"] > 20)
+        & (df["_proximity_start"] >= start_date)
+        & (df["_proximity_start"] <= end_date + " 23:59:59")
+    )
+    return df[mask].copy()
+
+
+# ---------------------------------------------------------------------------
+# Steps 6-9: Dispatch filter + detention-hour rule + Stamp Status rejected
+# (unchanged from the original script)
+# ---------------------------------------------------------------------------
+
+def filter_dispatch_for_detention(dispatch_raw: pd.DataFrame) -> pd.DataFrame:
+    df = dispatch_raw.copy()
+    df["EPOD_Timestamp"] = pd.to_numeric(df["EPOD_Timestamp"], errors="coerce").fillna(0)
+    df["MIGO_Timestamp"] = pd.to_numeric(df["MIGO_Timestamp"], errors="coerce").fillna(0)
+    return df[(df["EPOD_Timestamp"] == 0) & (df["MIGO_Timestamp"] == 0)]
+
+
+def apply_detention_rules(candidates: pd.DataFrame, dispatch_filtered: pd.DataFrame,
+                           now: pd.Timestamp) -> pd.DataFrame:
+    disp_inv = set(dispatch_filtered["Invoice Number"].astype(str).str.strip())
+    df = candidates[candidates["Invoice no"].astype(str).str.strip().isin(disp_inv)].copy()
+
+    # Detention (Hours) — NOT a raw MTR column, computed here (see original
+    # script's docstring note on this being unconfirmed vs Khagash's exact
+    # "NOW" reference point). Unchanged from the original script.
+    df["Detention (Hours)"] = (now - df["_proximity_start"]).dt.total_seconds() / 3600
+
+    mask = (
+        ((df["Lead Distance"] <= 200) & (df["Detention (Hours)"] <= 24))
+        | ((df["Lead Distance"] > 200) & (df["Detention (Hours)"] <= 48))
+    )
+    df = df[mask]
+
+    df = df[df["Stamp Status"] != "Rejected"]
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Merge in the Detention Bot's remark (pass-through, no reclassification,
+# unchanged from the original script)
+# ---------------------------------------------------------------------------
+
+def merge_bot_remarks(df: pd.DataFrame, bot_output: pd.DataFrame) -> pd.DataFrame:
+    bot = bot_output[bot_output["status"] == "ok"][["trip_id", "remark"]].copy()
+    bot["trip_id"] = bot["trip_id"].astype(str).str.strip()
+    df = df.copy()
+    df["Trip ID"] = df["Trip ID"].astype(str).str.strip()
+    df = df.merge(bot, left_on="Trip ID", right_on="trip_id", how="inner")
+    df = df.rename(columns={"remark": "Remark"})
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Build the Summary tab (unchanged from the original script)
+# ---------------------------------------------------------------------------
+
+def build_summary(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # UNCONFIRMED filter — see docstring at top of this file.
+    df = df[df["Remark"].isin(SUMMARY_INCLUDE_REMARKS)]
+
+    df["Detention Days"] = df["Detention (Hours)"] / 24
+
+    out = pd.DataFrame({
+        "Plant Name": df["Org Location"],
+        "Invoice Number": df["Invoice no"],
+        "Quantity": df.get("Quantity", ""),
+        "Distribution Channel": df.get("Distribution Channel", ""),
+        "Vehicle number": df["Vehicle No."],
+        "Transporter": df["Transporter"],
+        "Ship to Region": df.get("Ship to District", ""),
+        "Ship to District": df.get("Ship to District", ""),
+        "Unloading Point": df.get("Destination", ""),
+        "Invoice Date": df["Invoice Date & Time"],
+        "Detention Since": df["_proximity_start"],
+        "Detention (Hours)": df["Detention (Hours)"],
+        "Ship to Party": df.get("SOLD TO NM", ""),
+        "Lead Distance": df["Lead Distance"],
+        "Detention Days": df["Detention Days"],
+    })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Split into 4 plant-wise files, zip them for a single download
+# ---------------------------------------------------------------------------
+
+def _write_plant_outputs_zip(summary: pd.DataFrame, report_date: str, output_dir: Path) -> Path:
+    xlsx_paths = []
+    for plant in ORG_LOCATIONS_ALL:
+        plant_df = summary[summary["Plant Name"] == plant]
+        plant_short = plant.replace("JKLC ", "")
+        xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{report_date}.xlsx"
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            plant_df.to_excel(writer, sheet_name="Summary", index=False)
+        xlsx_paths.append(xlsx_path)
+        log.info("%s: %d rows -> %s", plant, len(plant_df), xlsx_path.name)
+
+    zip_path = output_dir / f"JKLC_Live_Detention_{report_date}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in xlsx_paths:
+            zf.write(p, arcname=p.name)
+    return zip_path
+
+
+# ---------------------------------------------------------------------------
+# Entry point used by the generic upload -> process -> download route
+# ---------------------------------------------------------------------------
+
+def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
+    mtr_path = input_files["mtr_raw"]
+    dispatch_path = input_files["dispatch"]
+    bot_path = input_files["detention_bot"]
+
+    report_date = dates["report_date"]
+    start_date, end_date = _compute_date_window(report_date)
+    log.info("Processing JKLC Live Detention for %s (window %s to %s)", report_date, start_date, end_date)
+
+    mtr_raw = _read_any(mtr_path)
+    dispatch_raw = _read_any(dispatch_path)
+    bot_output = _read_any(bot_path)
+
+    try:
+        mtr_clean = clean_mtr(mtr_raw, start_date, end_date)
+        candidates = build_20km_candidates(mtr_clean, start_date, end_date)
+        dispatch_filtered = filter_dispatch_for_detention(dispatch_raw)
+    except KeyError as exc:
+        raise ReportProcessingError(
+            f"Expected column {exc} not found. Check you uploaded the correct "
+            "file for each slot (MTR Raw / Daily Dispatch / Detention Bot output)."
+        ) from exc
+
+    now = pd.Timestamp(datetime.now())
+    detained = apply_detention_rules(candidates, dispatch_filtered, now)
+
+    try:
+        merged = merge_bot_remarks(detained, bot_output)
+    except KeyError as exc:
+        raise ReportProcessingError(
+            f"Expected column {exc} not found in the Detention Bot output. "
+            "Check you uploaded the bot's output CSV (trip_id, remark, status, error)."
+        ) from exc
+
+    summary = build_summary(merged)
+    log.info("Final Summary rows: %d (%s)", len(summary), dict(summary["Plant Name"].value_counts()))
+
+    return _write_plant_outputs_zip(summary, report_date, output_dir)
+
 
 register(
     ReportMeta(
         id="2",
         name="JKLC Live Detention",
         input_slots=[
-            InputSlot(key="mtr_raw", label="MTR Raw", accept=".csv,.xlsx", hint="raw_mtr_-_<timestamp>.csv"),
+            InputSlot(
+                key="mtr_raw",
+                label="MTR Raw",
+                accept=".csv,.xlsx",
+                hint="mtr - 2026-07-13T171021.301.csv",
+            ),
+            InputSlot(
+                key="dispatch",
+                label="Daily Dispatch",
+                accept=".xlsx",
+                hint="daily dispatch 13 Axestrack (75).xlsx",
+            ),
             InputSlot(
                 key="detention_bot",
                 label="Detention Bot Output",
-                accept=".csv,.xlsx",
-                hint="detention_bot_output_<date>.csv",
+                accept=".csv",
+                hint="bot output 13 detention_results.csv",
             ),
         ],
-        output_pattern="JKLC_Live_Detention_Master_<date>.xlsx",
-        process_fn=not_implemented_process("JKLC Live Detention"),
-        implemented=False,
-        notes="Plant-wise: Durg, Jharli, Surat, Cuttack. Output tabs: MTR, 20KM, Summary, Dispatch, Mail ID.",
+        output_pattern="JKLC_Live_Detention_<date>.zip (4 plant .xlsx files inside)",
+        process_fn=process,
+        implemented=True,
+        date_mode="single",
+        notes=(
+            "Step 5 date/end-time filter revised 14 July 2026 (validated against real "
+            "13 July data). Bot-remark filter (SUMMARY_INCLUDE_REMARKS) still unconfirmed. "
+            "Full pipeline row-count validation blocked by a bot/MTR pull-timing gap in "
+            "available test data — see chat for details."
+        ),
     )
 )
