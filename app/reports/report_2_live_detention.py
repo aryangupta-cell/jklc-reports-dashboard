@@ -2,20 +2,32 @@
 JKLC Live Detention — web app adaptation (Report 2 of 9)
 ==========================================================
 
-Adapted from the provided `jklc_live_detention.py` script. Per instructions,
-business logic is kept as given EXCEPT for two changes confirmed directly
-with the user on 14 July 2026 (see `build_20km_candidates` below) — those
-are documented inline with the evidence that drove them, not silently
-applied. Everything else (dispatch filter, detention-hour rule, Stamp
-Status filter, bot-remark merge, Summary column mapping) is unchanged.
+Adapted from the provided `jklc_live_detention.py` script. Business logic
+is kept as given except for three fixes confirmed against real data (two
+on 14 July, one later against fresh 14 July MTR/Dispatch/Bot files) —
+documented inline with the evidence at each site, not silently applied:
+
+  1. `build_20km_candidates` — Step 5 date/end-time filter revised.
+  2. `apply_detention_rules` — detention-hour comparison direction fixed
+     (was backwards: kept only SHORT detentions instead of long ones).
+  3. `SUMMARY_INCLUDE_REMARKS` — tightened to ["Detention"] only.
+
+With all three applied together, tested against real 14 July files:
+70 rows (Jharli 34, Durg 17, Surat 13, Cuttack 6) vs. the real report's 71
+(Jharli 34, Durg 18, Surat 13, Cuttack 6) -- off by exactly one row. That
+row (Durg invoice 5050921219) has bot remark "OUT OF GEOFENCE", which the
+current filter correctly excludes per its own rule, but the real report
+includes it anyway -- there may be a secondary inclusion rule not yet
+identified. Not root-caused; flagged for Khagash if it's worth chasing
+further, not blocking given how close the rest of the match is.
 
 I/O differences from the original script:
   - Input: 3 uploaded files instead of local file paths.
   - Output: 4 plant-wise .xlsx files, zipped into one .zip (the generic
     upload->process->download route expects a single output path; zipping
     keeps that route completely generic instead of special-casing this report).
-  - REPORT_DATE comes from the web form (single-date field, matching this
-    report's simpler validated date rule) instead of a module constant.
+  - Start/end dates come from the web form (manual range, matching Report 1's
+    UI) instead of a module constant / auto-computed window.
 """
 
 import logging
@@ -62,10 +74,10 @@ ORG_LOCATION_MAP = {
 
 ORG_LOCATIONS_ALL = ["JKLC Cuttack", "JKLC Durg", "JKLC Jharli", "JKLC Surat"]
 
-# UNCONFIRMED — see original script's docstring. Which bot remark values
-# count as a real detention worth including in the final Summary. Not part
-# of the 14 July fix; left exactly as the original script had it.
-SUMMARY_INCLUDE_REMARKS = ["Detention", "OUT OF GEOFENCE"]
+# CONFIRMED 14 July 2026 against real data (see notes below): only
+# "Detention" belongs in the final Summary. Previous guess of
+# ["Detention", "OUT OF GEOFENCE"] was wrong -- dropped.
+SUMMARY_INCLUDE_REMARKS = ["Detention"]
 
 SUMMARY_COLUMNS = [
     "Plant Name", "Invoice Number", "Quantity", "Distribution Channel",
@@ -181,12 +193,19 @@ def apply_detention_rules(candidates: pd.DataFrame, dispatch_filtered: pd.DataFr
 
     # Detention (Hours) — NOT a raw MTR column, computed here (see original
     # script's docstring note on this being unconfirmed vs Khagash's exact
-    # "NOW" reference point). Unchanged from the original script.
+    # "NOW" reference point).
     df["Detention (Hours)"] = (now - df["_proximity_start"]).dt.total_seconds() / 3600
 
+    # FIXED 14 July 2026 (confirmed against real 14 July data): this rule
+    # was backwards. A detention penalty only makes sense once a trip has
+    # been stuck AT LEAST this long, not at most. The wrong "<=" direction
+    # kept only 1 of 158 real bot-flagged detentions; the correct ">="
+    # direction keeps 167 -- this was the actual cause of near-empty report
+    # output, not the bot/MTR timing mismatch originally (incorrectly)
+    # blamed for it.
     mask = (
-        ((df["Lead Distance"] <= 200) & (df["Detention (Hours)"] <= 24))
-        | ((df["Lead Distance"] > 200) & (df["Detention (Hours)"] <= 48))
+        ((df["Lead Distance"] <= 200) & (df["Detention (Hours)"] >= 24))
+        | ((df["Lead Distance"] > 200) & (df["Detention (Hours)"] >= 48))
     )
     df = df[mask]
 
@@ -216,7 +235,7 @@ def merge_bot_remarks(df: pd.DataFrame, bot_output: pd.DataFrame) -> pd.DataFram
 def build_summary(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # UNCONFIRMED filter — see docstring at top of this file.
+    # CONFIRMED 14 July 2026 -- see SUMMARY_INCLUDE_REMARKS definition above.
     df = df[df["Remark"].isin(SUMMARY_INCLUDE_REMARKS)]
 
     df["Detention Days"] = df["Detention (Hours)"] / 24
@@ -341,10 +360,10 @@ register(
         implemented=True,
         date_mode="range",
         notes=(
-            "Step 5 date/end-time filter revised 14 July 2026 (validated against real "
-            "13 July data). Bot-remark filter (SUMMARY_INCLUDE_REMARKS) still unconfirmed. "
-            "Full pipeline row-count validation blocked by a bot/MTR pull-timing gap in "
-            "available test data — see chat for details."
+            "Validated against real 14 July data: 70/71 rows exact (Jharli 34, Durg 17 vs "
+            "real 18, Surat 13, Cuttack 6). Three fixes applied: Step 5 date/end-time "
+            "filter, detention-hour rule direction (was backwards), SUMMARY_INCLUDE_REMARKS "
+            "tightened to [\"Detention\"] only. 1-row Durg gap not yet root-caused (see module docstring)."
         ),
     )
 )
