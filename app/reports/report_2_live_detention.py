@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
@@ -247,7 +247,10 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
         "Ship to Region": df.get("Ship to District", ""),
         "Ship to District": df.get("Ship to District", ""),
         "Unloading Point": df.get("Destination", ""),
-        "Invoice Date": df["Invoice Date & Time"],
+        # Parsed to a real datetime (not the raw string) so Excel's
+        # "m/d/yy h:mm" number format (matching the real file) actually
+        # renders as a date instead of showing the literal text.
+        "Invoice Date": pd.to_datetime(df["Invoice Date & Time"], errors="coerce"),
         "Detention Since": df["_proximity_start"],
         "Detention (Hours)": df["Detention (Hours)"],
         "Ship to Party": df.get("SOLD TO NM", ""),
@@ -258,28 +261,71 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Format utilities for Excel output (matching the real master file's Summary
-# tab formatting)
+# Format utilities for Excel output — extracted cell-by-cell from the real
+# master file (JKLC Live Detention Master 14th July 26.xlsx, Summary tab)
+# so plant-wise files look identical to what Khagash produces by hand.
 # ---------------------------------------------------------------------------
 
 HEADER_FONT = Font(name="Calibri", size=11, bold=False)
+HEADER_FONT_BOLD = Font(name="Calibri", size=11, bold=True)  # "Detention Days" column only
 DATA_FONT = Font(name="Calibri", size=11)
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
+
+# Header fill: real file uses theme color "accent2, lighter 40%" (computed
+# from theme XML: ED7D31 accent2 + tint 0.6 -> F8CBAD) for every header cell
+# except "Detention Days", which is bold with a plain yellow fill instead.
+HEADER_FILL = PatternFill(fill_type="solid", fgColor="F8CBAD")
+DETENTION_DAYS_FILL = PatternFill(fill_type="solid", fgColor="FFFF00")
+
+THIN = Side(style="thin")
+THIN_BORDER = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+# Column widths, keyed by Summary column name (real file's C:Q widths).
+# "Detention Since" has no explicit width in the real file (left at Excel's
+# default ~8.43), so it's omitted here and falls through to the default below.
+COLUMN_WIDTHS = {
+    "Plant Name": 11.33, "Invoice Number": 14.0, "Quantity": 8.0,
+    "Distribution Channel": 20.78, "Vehicle number": 13.66, "Transporter": 43.22,
+    "Ship to Region": 14.66, "Ship to District": 22.78, "Unloading Point": 23.11,
+    "Invoice Date": 15.44, "Detention (Hours)": 15.55, "Ship to Party": 41.33,
+    "Lead Distance": 12.33, "Detention Days": 13.89,
+}
+
+# Real file formats Invoice Date / Detention Since as datetime, Detention
+# Days as a whole number; everything else is left General.
+DATETIME_COLUMNS = {"Invoice Date", "Detention Since"}
+INTEGER_COLUMNS = {"Detention Days"}
 
 
 def _write_summary_sheet(wb, df: pd.DataFrame):
     """Write the Summary sheet with headers at row 3, col C (matching the
-    real master file), Calibri 11pt, centered."""
+    real master file): fills, borders, column widths, and number formats
+    copied from the real file's Summary tab."""
     ws = wb.create_sheet("Summary")
-    for col_idx, col_name in enumerate(df.columns):
+    columns = list(df.columns)
+
+    for col_idx, col_name in enumerate(columns):
         cell = ws.cell(3, 3 + col_idx, value=col_name)
-        cell.font = HEADER_FONT
+        is_detention_days = col_name == "Detention Days"
+        cell.font = HEADER_FONT_BOLD if is_detention_days else HEADER_FONT
+        cell.fill = DETENTION_DAYS_FILL if is_detention_days else HEADER_FILL
         cell.alignment = CENTER_ALIGN
+        cell.border = THIN_BORDER
+
+        col_letter = ws.cell(3, 3 + col_idx).column_letter
+        ws.column_dimensions[col_letter].width = COLUMN_WIDTHS.get(col_name, 8.43)
+
     for row_idx, row in enumerate(df.itertuples(index=False), start=4):
         for col_idx, value in enumerate(row):
+            col_name = columns[col_idx]
             cell = ws.cell(row_idx, 3 + col_idx, value=value)
             cell.font = DATA_FONT
             cell.alignment = CENTER_ALIGN
+            cell.border = THIN_BORDER
+            if col_name in DATETIME_COLUMNS:
+                cell.number_format = "m/d/yy h:mm"
+            elif col_name in INTEGER_COLUMNS:
+                cell.number_format = "0"
     return ws
 
 
