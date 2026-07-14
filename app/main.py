@@ -3,11 +3,12 @@ import mimetypes
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from core.auth import require_settings_password
 from core.settings_store import (
     ReportOverride,
     SlotOverride,
@@ -139,7 +140,7 @@ async def generate(request: Request, report_id: str):
     )
 
 
-@app.get("/settings")
+@app.get("/settings", dependencies=[Depends(require_settings_password)])
 def settings_page(request: Request):
     overrides = load_overrides()
     reports_by_id = {r.id: r for r in REPORTS.values()}
@@ -153,7 +154,7 @@ def settings_page(request: Request):
     return templates.TemplateResponse(request, "settings.html", {"rows": rows})
 
 
-@app.post("/settings/save")
+@app.post("/settings/save", dependencies=[Depends(require_settings_password)])
 async def settings_save(request: Request):
     form = await request.form()
     reports_by_id = {r.id: r for r in REPORTS.values()}

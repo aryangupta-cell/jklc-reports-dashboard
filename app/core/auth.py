@@ -28,3 +28,19 @@ def require_auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+
+# Scoped to just the /settings page — the rest of the app is intentionally
+# open (per explicit instruction). Username is ignored; only the password
+# is checked, since this is a single shared gate, not a per-user login.
+SETTINGS_PASSWORD = "12345"
+
+
+def require_settings_password(credentials: HTTPBasicCredentials = Depends(security)) -> str:
+    if not secrets.compare_digest(credentials.password, SETTINGS_PASSWORD):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
