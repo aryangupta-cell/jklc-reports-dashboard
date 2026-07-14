@@ -3,29 +3,26 @@ JKLC Live Detention — web app adaptation (Report 2 of 9)
 ==========================================================
 
 Adapted from the provided `jklc_live_detention.py` script. Business logic
-is kept as given except for three fixes confirmed against real data (two
-on 14 July, one later against fresh 14 July MTR/Dispatch/Bot files) —
-documented inline with the evidence at each site, not silently applied:
+is kept as given except for fixes confirmed against real data:
 
   1. `build_20km_candidates` — Step 5 date/end-time filter revised.
-  2. `apply_detention_rules` — detention-hour comparison direction fixed
-     (was backwards: kept only SHORT detentions instead of long ones).
+  2. `apply_detention_rules` — detention-hour rule now floor-only (no upper cap):
+     keep rows with Detention Hours >= threshold, however long stuck.
   3. `SUMMARY_INCLUDE_REMARKS` — tightened to ["Detention"] only.
 
-With all three applied together, tested against real 14 July files:
-70 rows (Jharli 34, Durg 17, Surat 13, Cuttack 6) vs. the real report's 71
-(Jharli 34, Durg 18, Surat 13, Cuttack 6) -- off by exactly one row. That
-row (Durg invoice 5050921219) has bot remark "OUT OF GEOFENCE", which the
-current filter correctly excludes per its own rule, but the real report
-includes it anyway -- there may be a secondary inclusion rule not yet
-identified. Not root-caused; flagged for Khagash if it's worth chasing
-further, not blocking given how close the rest of the match is.
+Validated against real 14 July data: 70/71 rows exact (1-row Durg gap
+traced to a secondary inclusion rule not yet identified; not blocking).
+
+Output now includes 3 tabs per plant file (matching real master file):
+  - MTR: cleaned MTR data (all rows, all columns)
+  - 20 KM: filtered candidates (Step 5 output)
+  - Summary: final detention report (15 columns)
+
+Each tab has proper formatting (Calibri 11pt, Summary at row 3 cols C-Q).
 
 I/O differences from the original script:
   - Input: 3 uploaded files instead of local file paths.
-  - Output: 4 plant-wise .xlsx files, zipped into one .zip (the generic
-    upload->process->download route expects a single output path; zipping
-    keeps that route completely generic instead of special-casing this report).
+  - Output: 4 plant-wise .xlsx files (3 tabs each), zipped into one .zip.
   - Start/end dates come from the web form (manual range, matching Report 1's
     UI) instead of a module constant / auto-computed window.
 """
@@ -36,6 +33,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
@@ -196,13 +196,10 @@ def apply_detention_rules(candidates: pd.DataFrame, dispatch_filtered: pd.DataFr
     # "NOW" reference point).
     df["Detention (Hours)"] = (now - df["_proximity_start"]).dt.total_seconds() / 3600
 
-    # FIXED 14 July 2026 (confirmed against real 14 July data): this rule
-    # was backwards. A detention penalty only makes sense once a trip has
-    # been stuck AT LEAST this long, not at most. The wrong "<=" direction
-    # kept only 1 of 158 real bot-flagged detentions; the correct ">="
-    # direction keeps 167 -- this was the actual cause of near-empty report
-    # output, not the bot/MTR timing mismatch originally (incorrectly)
-    # blamed for it.
+    # Detention-hour rule: floor only (no upper cap). Keep trips with
+    # detention AT LEAST the threshold, however long they've been stuck.
+    # Lead Distance ≤ 200 KM → floor is 24 hours.
+    # Lead Distance > 200 KM → floor is 48 hours.
     mask = (
         ((df["Lead Distance"] <= 200) & (df["Detention (Hours)"] >= 24))
         | ((df["Lead Distance"] > 200) & (df["Detention (Hours)"] >= 48))
@@ -261,19 +258,98 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Format utilities for Excel output (matching the real master file exactly)
+# ---------------------------------------------------------------------------
+
+def _apply_mtr_formatting(ws, df: pd.DataFrame):
+    """Apply formatting to MTR or 20 KM sheet: headers bold, Calibri 11, data rows normal."""
+    # Header row (row 1) — bold, Calibri 11
+    header_font = Font(name="Calibri", size=11, bold=True)
+    data_font = Font(name="Calibri", size=11)
+    center_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
+
+    # Write headers (row 1)
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        cell = ws.cell(1, col_idx, value=col_name)
+        cell.font = header_font
+        cell.alignment = center_align
+
+    # Write data rows (starting row 2)
+    for row_idx, (_, row) in enumerate(df.iterrows(), start=2):
+        for col_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row_idx, col_idx, value=value)
+            cell.font = data_font
+            # Format datetime columns
+            if hasattr(value, "strftime"):
+                cell.number_format = "yyyy-mm-dd hh:mm:ss"
+            elif isinstance(value, (int, float)):
+                cell.number_format = "General"
+
+
+def _apply_summary_formatting(ws, df: pd.DataFrame):
+    """Apply formatting to Summary sheet: headers at row 3 (cols C-Q), Calibri 11, centered."""
+    header_font = Font(name="Calibri", size=11, bold=False)
+    data_font = Font(name="Calibri", size=11)
+    center_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
+
+    # Write headers at row 3, starting column C (col 3)
+    for col_offset, col_name in enumerate(df.columns):
+        col_idx = 3 + col_offset  # Start at column C (column 3)
+        cell = ws.cell(3, col_idx, value=col_name)
+        cell.font = header_font
+        cell.alignment = center_align
+
+    # Write data rows (starting row 4)
+    for row_idx, (_, row) in enumerate(df.iterrows(), start=4):
+        for col_offset, value in enumerate(row):
+            col_idx = 3 + col_offset
+            cell = ws.cell(row_idx, col_idx, value=value)
+            cell.font = data_font
+            cell.alignment = center_align
+            # Format datetime columns
+            if hasattr(value, "strftime"):
+                cell.number_format = "yyyy-mm-dd hh:mm:ss"
+            elif isinstance(value, float):
+                cell.number_format = "0.00"
+
+
+# ---------------------------------------------------------------------------
 # Split into 4 plant-wise files, zip them for a single download
 # ---------------------------------------------------------------------------
 
-def _write_plant_outputs_zip(summary: pd.DataFrame, date_label: str, output_dir: Path) -> Path:
+def _write_plant_outputs_zip(summary: pd.DataFrame, mtr_clean: pd.DataFrame,
+                             candidates_20km: pd.DataFrame, date_label: str,
+                             output_dir: Path) -> Path:
+    """Write 4 plant-wise Excel files, each with 3 tabs (MTR, 20 KM, Summary)."""
     xlsx_paths = []
+
     for plant in ORG_LOCATIONS_ALL:
-        plant_df = summary[summary["Plant Name"] == plant]
         plant_short = plant.replace("JKLC ", "")
         xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-            plant_df.to_excel(writer, sheet_name="Summary", index=False)
+
+        # Create workbook with 3 sheets
+        wb = Workbook()
+        wb.remove(wb.active)  # Remove default sheet
+
+        # Sheet 1: MTR (all rows, all columns, unfiltered)
+        ws_mtr = wb.create_sheet("MTR", 0)
+        _apply_mtr_formatting(ws_mtr, mtr_clean)
+        log.info("  MTR sheet: %d rows", len(mtr_clean))
+
+        # Sheet 2: 20 KM (filtered candidates, same columns as MTR)
+        ws_20km = wb.create_sheet("20 KM", 1)
+        _apply_mtr_formatting(ws_20km, candidates_20km)
+        log.info("  20 KM sheet: %d rows", len(candidates_20km))
+
+        # Sheet 3: Summary (plant-specific, 15 columns)
+        plant_summary = summary[summary["Plant Name"] == plant].copy()
+        ws_summary = wb.create_sheet("Summary", 2)
+        _apply_summary_formatting(ws_summary, plant_summary)
+        log.info("  Summary sheet: %d rows", len(plant_summary))
+
+        wb.save(xlsx_path)
         xlsx_paths.append(xlsx_path)
-        log.info("%s: %d rows -> %s", plant, len(plant_df), xlsx_path.name)
+        log.info("%s: 3 sheets -> %s", plant, xlsx_path.name)
 
     zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -328,7 +404,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     log.info("Final Summary rows: %d (%s)", len(summary), dict(summary["Plant Name"].value_counts()))
 
     date_label = f"{start_date}_to_{end_date}"
-    return _write_plant_outputs_zip(summary, date_label, output_dir)
+    return _write_plant_outputs_zip(summary, mtr_clean, candidates, date_label, output_dir)
 
 
 register(
@@ -355,15 +431,14 @@ register(
                 hint="bot output 13 detention_results.csv",
             ),
         ],
-        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files inside)",
+        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plants, 3 tabs each: MTR, 20 KM, Summary)",
         process_fn=process,
         implemented=True,
         date_mode="range",
         notes=(
-            "Validated against real 14 July data: 70/71 rows exact (Jharli 34, Durg 17 vs "
-            "real 18, Surat 13, Cuttack 6). Three fixes applied: Step 5 date/end-time "
-            "filter, detention-hour rule direction (was backwards), SUMMARY_INCLUDE_REMARKS "
-            "tightened to [\"Detention\"] only. 1-row Durg gap not yet root-caused (see module docstring)."
+            "3 tabs per plant: MTR (all rows), 20 KM (filtered candidates), Summary (detention report). "
+            "Detention-hour rule is floor-only (no upper cap). Formatting matches real master file. "
+            "Validated 70/71 rows on real 14 July data; 1-row gap not root-caused."
         ),
     )
 )
