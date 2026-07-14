@@ -13,16 +13,17 @@ is kept as given except for fixes confirmed against real data:
 Validated against real 14 July data: 70/71 rows exact (1-row Durg gap
 traced to a secondary inclusion rule not yet identified; not blocking).
 
-Output now includes 3 tabs per plant file (matching real master file):
-  - MTR: cleaned MTR data (all rows, all columns)
-  - 20 KM: filtered candidates (Step 5 output)
-  - Summary: final detention report (15 columns)
-
-Each tab has proper formatting (Calibri 11pt, Summary at row 3 cols C-Q).
+Output is Summary-only (15 columns, formatted to match the real master
+file: Calibri 11pt, centered, headers at row 3 starting col C). MTR and
+20 KM tabs were tried (to match the real master file's 3-tab structure)
+but removed again -- writing that much data (25k+ MTR rows x 121 cols,
+x4 plant files) pushed peak memory to ~300MB+ on Render's free tier
+(512MB limit) and caused an OOM-driven 502. Per explicit instruction,
+staying Summary-only until the hosting plan is upgraded.
 
 I/O differences from the original script:
   - Input: 3 uploaded files instead of local file paths.
-  - Output: 4 plant-wise .xlsx files (3 tabs each), zipped into one .zip.
+  - Output: 4 plant-wise .xlsx files, zipped into one .zip.
   - Start/end dates come from the web form (manual range, matching Report 1's
     UI) instead of a module constant / auto-computed window.
 """
@@ -257,86 +258,56 @@ def build_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Format utilities for Excel output (matching the real master file exactly)
+# Format utilities for Excel output (matching the real master file's Summary
+# tab formatting)
 # ---------------------------------------------------------------------------
 
 HEADER_FONT = Font(name="Calibri", size=11, bold=False)
-HEADER_FONT_BOLD = Font(name="Calibri", size=11, bold=True)
 DATA_FONT = Font(name="Calibri", size=11)
 CENTER_ALIGN = Alignment(horizontal="center", vertical="center")
 
 
-def _write_bulk_sheet(wb, sheet_name: str, df: pd.DataFrame, bold_header: bool = False,
-                      row_offset: int = 0, col_offset: int = 0):
-    """Write a DataFrame into a new sheet using ws.append (fast row-at-a-time
-    bulk write) instead of pandas' ExcelWriter + a second openpyxl reload --
-    that double round-trip was the actual cause of the Render 502 (measured
-    68s to write 4 plant files locally; Render's shared CPU is slower still
-    and was tripping the platform's ~100s request timeout).
-    """
-    ws = wb.create_sheet(sheet_name)
-    header_font = HEADER_FONT_BOLD if bold_header else HEADER_FONT
-
-    if row_offset or col_offset:
-        for col_idx, col_name in enumerate(df.columns):
-            cell = ws.cell(1 + row_offset, 1 + col_offset + col_idx, value=col_name)
-            cell.font = header_font
-            cell.alignment = CENTER_ALIGN
-        for row_idx, row in enumerate(df.itertuples(index=False), start=1):
-            for col_idx, value in enumerate(row):
-                cell = ws.cell(1 + row_offset + row_idx, 1 + col_offset + col_idx, value=value)
-                cell.font = DATA_FONT
-                cell.alignment = CENTER_ALIGN
-        return ws
-
-    ws.append(list(df.columns))
-    for cell in ws[1]:
-        cell.font = header_font
+def _write_summary_sheet(wb, df: pd.DataFrame):
+    """Write the Summary sheet with headers at row 3, col C (matching the
+    real master file), Calibri 11pt, centered."""
+    ws = wb.create_sheet("Summary")
+    for col_idx, col_name in enumerate(df.columns):
+        cell = ws.cell(3, 3 + col_idx, value=col_name)
+        cell.font = HEADER_FONT
         cell.alignment = CENTER_ALIGN
-    for row in df.itertuples(index=False):
-        ws.append(row)
+    for row_idx, row in enumerate(df.itertuples(index=False), start=4):
+        for col_idx, value in enumerate(row):
+            cell = ws.cell(row_idx, 3 + col_idx, value=value)
+            cell.font = DATA_FONT
+            cell.alignment = CENTER_ALIGN
     return ws
 
 
 # ---------------------------------------------------------------------------
 # Split into 4 plant-wise files, zip them for a single download
+#
+# NOTE: MTR and 20 KM tabs were tried (per an earlier request to match the
+# real master file's 3-tab structure) but removed again -- writing that much
+# data (25k+ MTR rows x 121 cols, x4 plant files) pushed peak memory to
+# ~300MB+ on top of the interpreter/FastAPI baseline, which exceeds Render's
+# free-tier 512MB limit and caused an OOM-driven 502. Per explicit
+# instruction, staying Summary-only until the hosting plan can be upgraded.
 # ---------------------------------------------------------------------------
 
-def _write_plant_outputs_zip(summary: pd.DataFrame, mtr_clean: pd.DataFrame,
-                             candidates_20km: pd.DataFrame, date_label: str,
-                             output_dir: Path) -> Path:
-    """Write 4 plant-wise Excel files, each with 3 tabs (MTR, 20 KM, Summary).
-
-    Each tab is filtered to that plant's own rows (via Org Location / Plant
-    Name) -- not the full unfiltered dataset -- both because that's the
-    point of a "per-plant report" and because writing the full ~25k-row MTR
-    table into all 4 files (100k+ rows total) was needlessly slow.
-    """
-    mtr_write = mtr_clean.drop(columns=["_inv_dt"], errors="ignore")
-    km20_write = candidates_20km.drop(columns=["_inv_dt", "_proximity_start"], errors="ignore")
-
+def _write_plant_outputs_zip(summary: pd.DataFrame, date_label: str, output_dir: Path) -> Path:
     xlsx_paths = []
 
     for plant in ORG_LOCATIONS_ALL:
         plant_short = plant.replace("JKLC ", "")
         xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
-
-        plant_mtr = mtr_write[mtr_write["Org Location"] == plant]
-        plant_20km = km20_write[km20_write["Org Location"] == plant]
         plant_summary = summary[summary["Plant Name"] == plant]
 
         wb = Workbook()
         wb.remove(wb.active)  # drop the default blank sheet
-
-        _write_bulk_sheet(wb, "MTR", plant_mtr, bold_header=True)
-        _write_bulk_sheet(wb, "20 KM", plant_20km, bold_header=False)
-        # Summary matches the real master file: headers at row 3, col C.
-        _write_bulk_sheet(wb, "Summary", plant_summary, bold_header=False,
-                          row_offset=2, col_offset=2)
-
+        _write_summary_sheet(wb, plant_summary)
         wb.save(xlsx_path)
-        log.info("%s: MTR %d rows, 20KM %d rows, Summary %d rows -> %s",
-                 plant, len(plant_mtr), len(plant_20km), len(plant_summary), xlsx_path.name)
+
+        log.info("%s: %d rows -> %s", plant, len(plant_summary), xlsx_path.name)
         xlsx_paths.append(xlsx_path)
 
     zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
@@ -392,7 +363,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     log.info("Final Summary rows: %d (%s)", len(summary), dict(summary["Plant Name"].value_counts()))
 
     date_label = f"{start_date}_to_{end_date}"
-    return _write_plant_outputs_zip(summary, mtr_clean, candidates, date_label, output_dir)
+    return _write_plant_outputs_zip(summary, date_label, output_dir)
 
 
 register(
@@ -419,14 +390,15 @@ register(
                 hint="bot output 13 detention_results.csv",
             ),
         ],
-        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plants, 3 tabs each: MTR, 20 KM, Summary)",
+        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files, Summary tab only)",
         process_fn=process,
         implemented=True,
         date_mode="range",
         notes=(
-            "3 tabs per plant: MTR (all rows), 20 KM (filtered candidates), Summary (detention report). "
-            "Detention-hour rule is floor-only (no upper cap). Formatting matches real master file. "
-            "Validated 70/71 rows on real 14 July data; 1-row gap not root-caused."
+            "Summary tab only (MTR/20 KM tabs tried but dropped -- OOM on Render free tier, "
+            "see module docstring). Detention-hour rule is floor-only (no upper cap). "
+            "Formatting matches real master file. Validated 70/71 rows on real 14 July data; "
+            "1-row gap not root-caused."
         ),
     )
 )
