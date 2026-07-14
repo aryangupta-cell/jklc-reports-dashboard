@@ -157,9 +157,13 @@ def clean_mtr(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
 
     df = df[df["Transporter"].str.strip().str.upper() != "M/S. OWN TRUCK DURG"]
 
+    # Rename GPS-API -> AT FIX (always applied, independent of the mode
+    # filter below — confirmed 14 July 2026: these are the same tracking
+    # mode and should be unified regardless of whether rows get filtered).
+    df["Mode"] = df["Mode"].replace({"GPS-API": "AT FIX"})
+
     if APPLY_MODE_FILTER:
         df = df[df["Mode"].isin(["AT FIX", "GPS-API"])]
-        df["Mode"] = df["Mode"].replace({"GPS-API": "AT FIX"})
 
     return df
 
