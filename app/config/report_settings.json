@@ -1,0 +1,155 @@
+{
+  "1": {
+    "name": "JKLC Daily Tracker",
+    "notes": "Fully validated, script provided.",
+    "output_pattern": "JKLC_Daily_Tracker_<start>_to_<end>.xlsx",
+    "enabled": true,
+    "order": 1,
+    "slots": {
+      "mtr_raw": {
+        "label": "MTR Raw",
+        "hint": "raw_mtr_-_2026-07-13T125713_927.csv"
+      },
+      "dispatch": {
+        "label": "Daily Dispatch",
+        "hint": "Axestrack (72) Daily dispatch 9 july.xlsx"
+      }
+    }
+  },
+  "2": {
+    "name": "JKLC Live Detention",
+    "notes": "Plant-wise: Durg, Jharli, Surat, Cuttack. Output tabs: MTR, 20KM, Summary, Dispatch, Mail ID.",
+    "output_pattern": "JKLC_Live_Detention_Master_<date>.xlsx",
+    "enabled": true,
+    "order": 2,
+    "slots": {
+      "mtr_raw": {
+        "label": "MTR Raw",
+        "hint": "raw_mtr_-_<timestamp>.csv"
+      },
+      "detention_bot": {
+        "label": "Detention Bot Output",
+        "hint": "detention_bot_output_<date>.csv"
+      }
+    }
+  },
+  "3": {
+    "name": "JKLC Daily Tracking Report",
+    "notes": "",
+    "output_pattern": "JKLC_Daily_Tracking_Report_<date>.xlsx",
+    "enabled": true,
+    "order": 3,
+    "slots": {
+      "mtr_raw": {
+        "label": "MTR Raw",
+        "hint": "raw_mtr_-_<timestamp>.csv"
+      },
+      "at_dashboard": {
+        "label": "AT Dashboard / Device Status Export",
+        "hint": "device_status_<date>.xlsx"
+      },
+      "master_entry_durg": {
+        "label": "Master Entry Data (Durg)",
+        "hint": "master_entry_durg_<date>.xlsx"
+      }
+    }
+  },
+  "4": {
+    "name": "Daily Battery Disconnected Consolidated Report",
+    "notes": "",
+    "output_pattern": "Daily_Battery_Disconnected_Consolidated_Report_<date>.xlsx",
+    "enabled": true,
+    "order": 4,
+    "slots": {
+      "mtr_raw_yesterday": {
+        "label": "MTR Raw (yesterday)",
+        "hint": "raw_mtr_-_<timestamp>.csv"
+      }
+    }
+  },
+  "5": {
+    "name": "JKLC AT Fix On-Trip Vehicle Status",
+    "notes": "",
+    "output_pattern": "JKLC_AT_Fix_Ontrip_Vehicles_Status_<date>.xlsx",
+    "enabled": true,
+    "order": 5,
+    "slots": {
+      "daily_tracking_output": {
+        "label": "Daily Tracking Report Output",
+        "hint": "JKLC_Daily_Tracking_Report_<date>.xlsx"
+      },
+      "whatsapp_remarks": {
+        "label": "WhatsApp Technician Remarks",
+        "hint": "technician_remarks_<date>.xlsx"
+      }
+    }
+  },
+  "6": {
+    "name": "Battery Disconnection Mail Creation",
+    "notes": "Output is individual mail draft(s) per shipment, not a single spreadsheet.",
+    "output_pattern": "battery_disconnection_mail_drafts_<date>.eml",
+    "enabled": true,
+    "order": 6,
+    "slots": {
+      "mtr_raw": {
+        "label": "MTR Raw",
+        "hint": "raw_mtr_-_<timestamp>.csv"
+      },
+      "route_tracker_check": {
+        "label": "Route Tracker Check",
+        "hint": "route_tracker_check_<date>.xlsx"
+      }
+    }
+  },
+  "7": {
+    "name": "Control Tower Tracker",
+    "notes": "",
+    "output_pattern": "Control_Tower_Tracker_<date>.xlsx",
+    "enabled": true,
+    "order": 7,
+    "slots": {
+      "mtr_raw_yesterday": {
+        "label": "MTR Raw (yesterday)",
+        "hint": "raw_mtr_-_<timestamp>.csv"
+      },
+      "dump_code_list": {
+        "label": "Client Dump-Code List",
+        "hint": "dump_code_list_<date>.xlsx"
+      },
+      "allowance_40km": {
+        "label": "40km Allowance Report",
+        "hint": "40km_allowance_<date>.xlsx"
+      }
+    }
+  },
+  "8": {
+    "name": "Freight Deviation Mail",
+    "notes": "On hold for now \u2014 deprioritized, not currently being worked on.",
+    "output_pattern": "freight_deviation_mail_drafts_<date>.eml",
+    "enabled": false,
+    "order": 8,
+    "slots": {
+      "control_tower_output": {
+        "label": "Control Tower Tracker Output",
+        "hint": "Control_Tower_Tracker_<date>.xlsx"
+      },
+      "client_exception_list": {
+        "label": "Client Exception List",
+        "hint": "client_exception_list_<date>.xlsx"
+      }
+    }
+  },
+  "9": {
+    "name": "Durg Daily Installation Tracker",
+    "notes": "On hold for now \u2014 deprioritized, not currently being worked on.",
+    "output_pattern": "JKLC_Durg_Daily_Installation_<date>.xlsx",
+    "enabled": false,
+    "order": 9,
+    "slots": {
+      "whatsapp_ops_export": {
+        "label": "WhatsApp Ops Team Export",
+        "hint": "ops_team_export_<date>.xlsx"
+      }
+    }
+  }
+}
