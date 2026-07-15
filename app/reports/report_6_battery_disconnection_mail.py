@@ -1,22 +1,382 @@
-from reports._stub_helpers import not_implemented_process
+"""
+JKLC Battery Disconnection Mail Creation — web app adaptation (Report 6 of 9)
+================================================================================
+
+Adapted from the provided `jklc_battery_disconnection_mail.py` script and its
+companion reference doc. Rebuilds the daily "Battery_Disconnection_Master_
+<date>.xlsx" workbook Khagash maintains by hand -- this is a STATEFUL report:
+each run needs the PREVIOUS day's Master workbook as an input (uploaded fresh
+each time, same as any other file here -- there's no server-side persistence
+between runs, the "state" is simply whatever file the user uploads).
+
+Confirmed business logic (validated against real data -- see the reference
+doc for the original evidence trail, plus independent re-verification below):
+
+  1. Join key: 'Shipment No.' (consolidated report) == 'Shipment Number' (MTR).
+  2. 'Consolidated' tab = pure unfiltered daily append log, forever (Clinker
+     rows and same-day duplicate pings included).
+  3. 'Consolidated Shipment No.' tab = same daily rows, per day: join Product
+     Name from MTR -> drop Clinker rows -> dedupe by Shipment No. (keep first
+     row in file order) -> add STO/NON STO, Onward Status, shareable link,
+     Test -> leave Mail Status / vehicle test blank for new rows, preserve
+     existing values for carried-forward rows.
+  4. 'Master' tab = shipments whose 'vehicle test' starts with "offline"
+     (case-insensitive), append-only, excluding shipments whose latest
+     'Mail Status' is "Waived OFF".
+  5. 'MTR' tab = wholesale replaced with the latest MTR export each run.
+  6. 'Table' tab = carried forward unchanged (scratch/lookup helper,
+     unrelated to the pipeline).
+
+INDEPENDENTLY RE-VERIFIED (not just taking the provided script's word for it)
+against the real files (Battery_Disconnection_Master_1_July_2026.xlsx as
+"previous", Daily Battery Disconnected Consolidated Report 12th July 2026.xlsx
+as the new day, MTR pull from 2026-07-13T17:10, compared against the real
+Battery_Disconnection_Master_13_July_2026.xlsx):
+  - Consolidated Shipment No. rows for 7/12: 80/80 exact, identical shipment
+    sets both directions.
+  - STO/NON STO, shareable link: 0 diffs / 80 rows.
+  - Test, Onward Status: 32 diffs / 80 rows each -- CORRECTING the provided
+    doc's explanation here: it claimed every diff was "our script reporting
+    a MORE advanced state" (later MTR pull). Re-checking the actual diff
+    VALUES directly disproves that as a clean explanation -- both directions
+    occur (e.g. one row: ours = Pending, real = Stamp Verified, i.e. real is
+    MORE advanced; another: ours = AI Complete, real = Pending, ours is more
+    advanced; Test column diffs uniformly went the OPPOSITE direction from
+    the doc's claim). This is most consistent with MTR being live,
+    non-monotonic tracking data -- status fields aren't guaranteed to only
+    move forward between arbitrary pulls -- rather than a script defect, but
+    it should be described as "snapshot-sensitive, not fully understood",
+    not as a confirmed one-directional timing artifact.
+  - The join/filter/dedup pipeline itself (the part that actually matters
+    for correctness) IS solid: exact row counts and shipment-set matches.
+
+Still not automated (deliberately, per the reference doc): actual offline/
+online determination is a manual human judgment call (Mail Status / vehicle
+test columns), and actual mail-sending is out of scope -- this only builds
+the Master candidate list.
+
+I/O differences from the original script:
+  - Inputs: 3 uploaded files (previous Master .xlsx, today's raw consolidated
+    report .xlsx, latest MTR export) instead of CLI paths.
+  - Output: streamed back in the same request instead of written to a local
+    --output path.
+  - Report Date is a single web-form date field (this report is inherently a
+    single-day increment, same reasoning as Reports 3 & 5's date field).
+"""
+
+import logging
+from pathlib import Path
+
+import openpyxl
+import pandas as pd
+from openpyxl.styles import Font
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CONFIG — column names kept exact to match the real workbook / source files
+# ---------------------------------------------------------------------------
+
+RAW_CONSOLIDATED_COLS = [
+    "Vehicle No.", "Transporter Name", "Destination", "Event Lat.", "Event Long.",
+    "Ship to Name", "Shipment No.", "Location Area", "Location Date and Time",
+    "Invoice Date and Time", "Plant Name", "Status", "Unloading Point",
+    "Ship to code", "Invoice No.", "Distribution Channel",
+]
+
+CSN_TAB_COLS = [
+    "Mail Status", "vehicle test", "Date", "Vehicle No.", "Transporter", "Destination",
+    "Event Lat.", "Event Long.", "Ship To Name", "Shipment No.", "Location Area",
+    "Location Date and Time", "Invoice Date and Time", "Plant Name", "Status",
+    "Unloading Point", "Ship to code", "Invoice No.", "Distribution Channel",
+    "STO/NON STO", "Onward Status", "shareable link", "Test",
+]
+
+MASTER_TAB_COLS = [
+    "Shipment No.", "Invoice Number", "Plant Name", "Truck No", "Transporter Name",
+    "Unloading point(ship-to-party)", "Billing date", "Tracking Link", "Sold To Code",
+    "Name(Sold-To Party)", "Distribution Channel", "Region(Ship To Party)",
+    "District(Ship-To Party)", "QTY (MT)", "Freight loss", "Last Date", "Area",
+]
+
+DIST_CHANNEL_MAP = {20: "DEALER TRADE", 10: "DIR PARTY(NON TRADE)", 30: "STOCK TRANSFER"}
+
+FREIGHT_LOSS = 5000
+
+
+# ---------------------------------------------------------------------------
+# Loaders
+# ---------------------------------------------------------------------------
+
+def _load_mtr_lookup(mtr_path: Path):
+    """Load MTR raw export and build the lookup fields this pipeline needs."""
+    try:
+        if mtr_path.suffix.lower() == ".csv":
+            df = pd.read_csv(mtr_path, dtype={"Shipment Number": "Int64"})
+        else:
+            df = pd.read_excel(mtr_path, dtype={"Shipment Number": "Int64"})
+    except Exception as exc:
+        raise ReportProcessingError(f"Couldn't read MTR Raw file '{mtr_path.name}': {exc}") from exc
+
+    df = df.drop_duplicates(subset=["Shipment Number"], keep="first")
+    df = df.set_index("Shipment Number")
+    keep_cols = [
+        "Product Name", "Onward Status", "Share Trip", "40 Km Geofence Start Time",
+        "SOLD TO", "SOLD TO NM", "REGION_CODE", "Ship to District", "Quantity",
+    ]
+    return df[keep_cols], df  # (slim lookup, full df for MTR tab refresh)
+
+
+def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
+    """Load today's raw Daily Battery Disconnected Consolidated Report (Sheet1)."""
+    try:
+        df = pd.read_excel(path, sheet_name="Sheet1")
+    except Exception as exc:
+        raise ReportProcessingError(f"Couldn't read '{path.name}': {exc}") from exc
+    missing = set(RAW_CONSOLIDATED_COLS) - set(df.columns)
+    if missing:
+        raise ReportProcessingError(
+            f"'{path.name}' is missing expected columns: {sorted(missing)}. "
+            "Check you uploaded the Daily Battery Disconnected Consolidated Report."
+        )
+    return df[RAW_CONSOLIDATED_COLS].copy()
+
+
+def _load_prev_master_tabs(path: Path):
+    """Load the 3 tabs we carry forward from the previous Master workbook.
+    ('Table' tab is copied byte-for-byte later via openpyxl, not through pandas.)
+    """
+    try:
+        consolidated = pd.read_excel(path, sheet_name="Consolidated")
+        csn = pd.read_excel(path, sheet_name="Consolidated Shipment No.")
+        master = pd.read_excel(path, sheet_name="Master")
+    except Exception as exc:
+        raise ReportProcessingError(
+            f"Couldn't read '{path.name}': {exc}. Check you uploaded the previous day's "
+            "Battery_Disconnection_Master_<date>.xlsx (needs Consolidated, Consolidated "
+            "Shipment No., Master tabs)."
+        ) from exc
+    return consolidated, csn, master
+
+
+# ---------------------------------------------------------------------------
+# Pipeline steps
+# ---------------------------------------------------------------------------
+
+def build_new_consolidated_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp) -> pd.DataFrame:
+    """Tag today's raw rows with the report date, unfiltered (for 'Consolidated' tab)."""
+    df = new_raw_df.copy()
+    df.insert(0, "Date", report_date)
+    return df
+
+
+def build_new_csn_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp, mtr_lookup: pd.DataFrame):
+    """Clinker-filter + per-day dedupe + derive columns (for 'Consolidated Shipment No.')."""
+    df = new_raw_df.copy()
+
+    # Join Product Name (only used here to filter Clinker; not stored in CSN tab).
+    df = df.merge(
+        mtr_lookup[["Product Name"]], left_on="Shipment No.", right_index=True, how="left"
+    )
+    before = len(df)
+    df = df[~df["Product Name"].astype(str).str.lower().eq("clinker")]
+    clinker_dropped = before - len(df)
+
+    # Per-day dedupe, keep first occurrence in source file order.
+    before2 = len(df)
+    df = df.drop_duplicates(subset=["Shipment No."], keep="first")
+    dupes_dropped = before2 - len(df)
+
+    df.insert(0, "vehicle test", None)
+    df.insert(0, "Mail Status", None)
+    df.insert(2, "Date", report_date)
+
+    df = df.rename(columns={
+        "Transporter Name": "Transporter",
+        "Ship to Name": "Ship To Name",
+    })
+
+    df["STO/NON STO"] = df["Distribution Channel"].map(DIST_CHANNEL_MAP)
+    df["Onward Status"] = df["Shipment No."].map(mtr_lookup["Onward Status"]).fillna(0)
+    df["shareable link"] = df["Shipment No."].map(mtr_lookup["Share Trip"]).fillna(0)
+
+    geofence = df["Shipment No."].map(mtr_lookup["40 Km Geofence Start Time"])
+    found_in_mtr = df["Shipment No."].isin(mtr_lookup.index)
+    entered_40km = geofence.notna() & (geofence.astype(str).str.strip() != "")
+    df["Test"] = None
+    df.loc[found_in_mtr & entered_40km, "Test"] = "Enter"
+    df.loc[found_in_mtr & ~entered_40km, "Test"] = "Not Enter"
+    # shipments not found in MTR: Test stays blank ("Unknown") rather than guessed
+
+    df = df.drop(columns=["Product Name"])
+    df = df[CSN_TAB_COLS]
+
+    stats = {"clinker_dropped": clinker_dropped, "same_day_dupes_dropped": dupes_dropped}
+    return df, stats
+
+
+def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFrame, mtr_lookup: pd.DataFrame) -> pd.DataFrame:
+    """Find shipments newly qualifying for Master (vehicle test starts with 'offline')."""
+    df = full_csn_df.copy()
+    df["vehicle test"] = df["vehicle test"].fillna("")
+    df["_is_offline"] = df["vehicle test"].str.strip().str.lower().str.startswith("offline")
+
+    offline_ships = set(df.loc[df["_is_offline"], "Shipment No."].unique())
+    already_in_master = set(prev_master_df["Shipment No."].unique())
+
+    # Exclude shipments whose most recent Mail Status is "Waived OFF"
+    df_sorted = df.sort_values("Date")
+    latest_status = df_sorted.groupby("Shipment No.")["Mail Status"].last()
+    waived = set(latest_status[latest_status.astype(str).str.strip().str.lower() == "waived off"].index)
+
+    new_ships = offline_ships - already_in_master - waived
+    if not new_ships:
+        return pd.DataFrame(columns=MASTER_TAB_COLS)
+
+    # For each new shipment, take its most recent CSN record for the descriptive fields.
+    latest_rows = df_sorted[df_sorted["Shipment No."].isin(new_ships)].groupby(
+        "Shipment No.", as_index=False
+    ).last()
+
+    out = pd.DataFrame({
+        "Shipment No.": latest_rows["Shipment No."],
+        "Invoice Number": latest_rows["Invoice No."],
+        "Plant Name": latest_rows["Plant Name"],
+        "Truck No": latest_rows["Vehicle No."],
+        "Transporter Name": latest_rows["Transporter"],
+        "Unloading point(ship-to-party)": latest_rows["Unloading Point"],
+        "Billing date": latest_rows["Invoice Date and Time"],
+        "Tracking Link": latest_rows["Shipment No."].map(mtr_lookup["Share Trip"]),
+        "Sold To Code": latest_rows["Shipment No."].map(mtr_lookup["SOLD TO"]),
+        "Name(Sold-To Party)": latest_rows["Shipment No."].map(mtr_lookup["SOLD TO NM"]),
+        "Distribution Channel": latest_rows["Distribution Channel"],
+        "Region(Ship To Party)": latest_rows["Shipment No."].map(mtr_lookup["REGION_CODE"]),
+        "District(Ship-To Party)": latest_rows["Shipment No."].map(mtr_lookup["Ship to District"]),
+        "QTY (MT)": latest_rows["Shipment No."].map(mtr_lookup["Quantity"]),
+        "Freight loss": FREIGHT_LOSS,
+        "Last Date": latest_rows["Location Date and Time"],
+        "Area": latest_rows["Location Area"],
+    })
+    return out[MASTER_TAB_COLS]
+
+
+# ---------------------------------------------------------------------------
+# Writer
+# ---------------------------------------------------------------------------
+
+def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    for row in dataframe_to_rows(df, index=False, header=True):
+        ws.append(row)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+    return ws
+
+
+# ---------------------------------------------------------------------------
+# Entry point used by the generic upload -> process -> download route
+# ---------------------------------------------------------------------------
+
+def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
+    report_date_str = dates["report_date"]
+    report_date = pd.Timestamp(report_date_str)
+    log.info("Processing Battery Disconnection Mail Creation for %s", report_date_str)
+
+    mtr_lookup, mtr_full = _load_mtr_lookup(input_files["mtr_raw"])
+    new_raw = _load_new_consolidated_report(input_files["new_consolidated"])
+    prev_consolidated, prev_csn, prev_master = _load_prev_master_tabs(input_files["prev_master"])
+
+    try:
+        new_consolidated_rows = build_new_consolidated_rows(new_raw, report_date)
+        full_consolidated = pd.concat([prev_consolidated, new_consolidated_rows], ignore_index=True)
+
+        new_csn_rows, stats = build_new_csn_rows(new_raw, report_date, mtr_lookup)
+        full_csn = pd.concat([prev_csn, new_csn_rows], ignore_index=True)
+
+        new_master_rows = build_master_additions(full_csn, prev_master, mtr_lookup)
+        full_master = pd.concat([prev_master, new_master_rows], ignore_index=True)
+    except KeyError as exc:
+        raise ReportProcessingError(
+            f"Expected column {exc} not found. Check each file was uploaded to the correct "
+            "slot (Previous Master / Today's Consolidated Report / MTR Raw)."
+        ) from exc
+
+    review_queue = new_csn_rows[
+        (new_csn_rows["Test"] == "Not Enter") & (new_csn_rows["vehicle test"].isna())
+    ]
+    log.info(
+        "Clinker dropped: %d | Same-day dupes dropped: %d | New Master rows: %d | "
+        "Manual review queue: %d",
+        stats["clinker_dropped"], stats["same_day_dupes_dropped"],
+        len(new_master_rows), len(review_queue),
+    )
+
+    # Start from the previous file to keep the 'Table' tab intact untouched.
+    wb = openpyxl.load_workbook(input_files["prev_master"])
+    _write_sheet(wb, "Consolidated", full_consolidated)
+    _write_sheet(wb, "Consolidated Shipment No.", full_csn)
+    _write_sheet(wb, "Master", full_master)
+
+    # Refresh MTR tab wholesale.
+    if "MTR" in wb.sheetnames:
+        del wb["MTR"]
+    ws_mtr = wb.create_sheet("MTR")
+    for row in dataframe_to_rows(mtr_full.reset_index(), index=False, header=True):
+        ws_mtr.append(row)
+    for cell in ws_mtr[1]:
+        cell.font = Font(bold=True)
+    ws_mtr.freeze_panes = "A2"
+
+    # Reorder tabs to match the real workbook.
+    order = ["Consolidated", "Consolidated Shipment No.", "Table", "Master", "MTR"]
+    wb._sheets = [wb[name] for name in order if name in wb.sheetnames]
+
+    output_path = output_dir / f"Battery_Disconnection_Master_{report_date_str}.xlsx"
+    wb.save(output_path)
+    return output_path
+
 
 register(
     ReportMeta(
         id="6",
         name="Battery Disconnection Mail Creation",
         input_slots=[
-            InputSlot(key="mtr_raw", label="MTR Raw", accept=".csv,.xlsx", hint="raw_mtr_-_<timestamp>.csv"),
             InputSlot(
-                key="route_tracker_check",
-                label="Route Tracker Check",
-                accept=".csv,.xlsx",
-                hint="route_tracker_check_<date>.xlsx",
+                key="prev_master",
+                label="Previous Day's Master Workbook",
+                accept=".xlsx",
+                hint="Battery_Disconnection_Master_<prev_date>.xlsx",
             ),
+            InputSlot(
+                key="new_consolidated",
+                label="Today's Daily Battery Disconnected Consolidated Report",
+                accept=".xlsx",
+                hint="Daily Battery Disconnected Consolidated Report <date>.xlsx",
+            ),
+            InputSlot(key="mtr_raw", label="MTR Raw", accept=".csv,.xlsx", hint="mtr - <timestamp>.csv"),
         ],
-        output_pattern="battery_disconnection_mail_drafts_<date>.eml",
-        process_fn=not_implemented_process("Battery Disconnection Mail Creation"),
-        implemented=False,
-        notes="Output is individual mail draft(s) per shipment, not a single spreadsheet.",
+        output_pattern="Battery_Disconnection_Master_<date>.xlsx (5 tabs: Consolidated, Consolidated "
+                      "Shipment No., Table, Master, MTR)",
+        process_fn=process,
+        implemented=True,
+        date_mode="single",
+        notes=(
+            "Stateful report -- needs the PREVIOUS day's Master workbook as an input each run "
+            "(carries forward history + any manual Mail Status / vehicle test tags). Master tab = "
+            "shipments whose 'vehicle test' starts with 'offline', append-only, excluding 'Waived "
+            "OFF'. Technician offline/online determination and actual mail-sending stay manual/out "
+            "of scope -- this only builds the Master candidate list. Verified against real data: "
+            "Consolidated Shipment No. row counts and shipment sets match exactly (80/80); Test/ "
+            "Onward Status values are snapshot-sensitive (live MTR tracking data isn't guaranteed "
+            "monotonic between pulls) rather than a fixed timing artifact -- don't over-read small "
+            "diffs there against a different MTR pull."
+        ),
     )
 )
