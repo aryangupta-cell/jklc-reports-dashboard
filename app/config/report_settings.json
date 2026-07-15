@@ -57,15 +57,10 @@
   "4": {
     "name": "Daily Battery Disconnected Consolidated Report",
     "notes": "",
-    "output_pattern": "Daily_Battery_Disconnected_Consolidated_Report_<date>.xlsx",
+    "output_pattern": "",
     "enabled": true,
     "order": 4,
-    "slots": {
-      "mtr_raw_yesterday": {
-        "label": "MTR Raw (yesterday)",
-        "hint": "raw_mtr_-_<timestamp>.csv"
-      }
-    }
+    "slots": {}
   },
   "5": {
     "name": "JKLC AT Fix On-Trip Vehicle Status",
