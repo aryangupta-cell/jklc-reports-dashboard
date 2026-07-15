@@ -73,6 +73,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+from reports._stub_helpers import not_implemented_process
 from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
 
@@ -380,6 +381,18 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     return output_path
 
 
+# ---------------------------------------------------------------------------
+# ON HOLD (per explicit instruction): the pipeline above is fully implemented
+# and validated (see module docstring), but reprocessing the full growing
+# Consolidated/MTR history every run is too heavy for Render's free tier --
+# three production attempts 502'd (OOM, most likely: writing the output
+# alone takes ~39s of ~42.6s locally and only grows daily, and two very
+# different memory profiles, 467MB and 96MB tracked, still failed at
+# similar points). Registered as a stub until a hosting decision is made;
+# flip process_fn back to `process` and implemented=True to re-enable --
+# no other changes needed, the pipeline itself doesn't need touching.
+# ---------------------------------------------------------------------------
+
 register(
     ReportMeta(
         id="6",
@@ -401,19 +414,14 @@ register(
         ],
         output_pattern="Battery_Disconnection_Master_<date>.xlsx (5 tabs: Consolidated, Consolidated "
                       "Shipment No., Table, Master, MTR)",
-        process_fn=process,
-        implemented=True,
+        process_fn=not_implemented_process("Battery Disconnection Mail Creation"),
+        implemented=False,
         date_mode="single",
         notes=(
-            "Stateful report -- needs the PREVIOUS day's Master workbook as an input each run "
-            "(carries forward history + any manual Mail Status / vehicle test tags). Master tab = "
-            "shipments whose 'vehicle test' starts with 'offline', append-only, excluding 'Waived "
-            "OFF'. Technician offline/online determination and actual mail-sending stay manual/out "
-            "of scope -- this only builds the Master candidate list. Verified against real data: "
-            "Consolidated Shipment No. row counts and shipment sets match exactly (80/80); Test/ "
-            "Onward Status values are snapshot-sensitive (live MTR tracking data isn't guaranteed "
-            "monotonic between pulls) rather than a fixed timing artifact -- don't over-read small "
-            "diffs there against a different MTR pull."
+            "On hold: pipeline logic is fully implemented and validated (see module docstring), "
+            "but reprocessing the full growing Consolidated/MTR history every run is too heavy for "
+            "Render's free tier -- 3 production attempts 502'd. Needs a hosting decision (upgrade "
+            "plan, most likely) before re-enabling. Runs fine locally in the meantime."
         ),
     )
 )
