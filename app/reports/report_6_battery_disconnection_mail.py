@@ -72,7 +72,6 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from reports._stub_helpers import not_implemented_process
 from reports.errors import ReportProcessingError
 from reports.registry import InputSlot, ReportMeta, register
 
@@ -470,15 +469,15 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# ON HOLD (per explicit instruction): the pipeline above is fully implemented
-# and validated (see module docstring), but reprocessing the full growing
-# Consolidated/MTR history every run is too heavy for Render's free tier --
-# three production attempts 502'd (OOM, most likely: writing the output
-# alone takes ~39s of ~42.6s locally and only grows daily, and two very
-# different memory profiles, 467MB and 96MB tracked, still failed at
-# similar points). Registered as a stub until a hosting decision is made;
-# flip process_fn back to `process` and implemented=True to re-enable --
-# no other changes needed, the pipeline itself doesn't need touching.
+# RE-ENABLED for another live test (per explicit instruction): the previous
+# 3 production attempts 502'd (467MB/76s and 96MB/174s locally, both failed
+# in the 53-127s range on Render). Since then: switched to itertuples-based
+# writing (measured 42.6s/41.7s locally, down from the original 188s), and
+# this pass added real-file formatting with no additional per-cell cost
+# (confirmed no timing regression). Genuinely lower risk than the last
+# attempt, but still unproven on Render's actual CPU/memory -- if this
+# still 502s, the earlier stub-with-notes state is the fallback (see git
+# history for that version).
 # ---------------------------------------------------------------------------
 
 register(
@@ -502,14 +501,16 @@ register(
         ],
         output_pattern="Battery_Disconnection_Master_<date>.xlsx (5 tabs: Consolidated, Consolidated "
                       "Shipment No., Table, Master, MTR)",
-        process_fn=not_implemented_process("Battery Disconnection Mail Creation"),
-        implemented=False,
+        process_fn=process,
+        implemented=True,
         date_mode="single",
         notes=(
-            "On hold: pipeline logic is fully implemented and validated (see module docstring), "
-            "but reprocessing the full growing Consolidated/MTR history every run is too heavy for "
-            "Render's free tier -- 3 production attempts 502'd. Needs a hosting decision (upgrade "
-            "plan, most likely) before re-enabling. Runs fine locally in the meantime."
+            "Stateful report -- needs the PREVIOUS day's Master workbook as an input each run "
+            "(carries forward history + any manual Mail Status / vehicle test tags). Master tab = "
+            "shipments whose 'vehicle test' starts with 'offline', append-only, excluding 'Waived "
+            "OFF'. Formatting matches the real master file exactly. Previously 502'd on Render's "
+            "free tier 3 times before write-speed optimizations (188s -> ~42s locally) -- being "
+            "retested live; if it 502s again this needs a hosting upgrade, not more code tuning."
         ),
     )
 )
