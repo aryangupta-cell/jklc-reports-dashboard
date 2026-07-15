@@ -6,12 +6,16 @@ Adapted from the provided `jklc_daily_tracking_report.py` script and its
 companion reference doc, plus independent verification against the real
 12th July 2026 report and the SOP docx for this pass.
 
-Report shape: a single-day snapshot. The web form's one date field is
-DATA_DATE — the day whose completed trips / dispatches / installs this
-report covers (matches the real file's own title and filename exactly,
-e.g. "JKLC Daily Tracking Report 12-07-2026" covers DATA_DATE=2026-07-12).
-"Last 5 days" = DATA_DATE - 4 .. DATA_DATE. No cross-day accumulation (per
-explicit instruction) — every run is fresh.
+Report shape: a single-day snapshot, but the web form uses a Start Date /
+End Date range (matching Reports 1 & 2's UI) rather than one date field.
+END_DATE is DATA_DATE — the day whose completed trips / dispatches /
+installs this report covers (matches the real file's own title and
+filename exactly, e.g. "JKLC Daily Tracking Report 12-07-2026" covers
+DATA_DATE=2026-07-12). START_DATE only bounds the MTR tab's own date
+filter (previously MTR was passed through unfiltered, assuming the
+uploaded file was already pre-trimmed). "Last 5 days" = DATA_DATE - 4 ..
+DATA_DATE. No cross-day accumulation (per explicit instruction) — every
+run is fresh.
 
 CONVENTION CORRECTION vs the original script/reference doc: both called
 this "REPORT_DATE" and described it as "the day you're generating the
@@ -121,6 +125,9 @@ MTR_DROP_COLUMNS = [
     "40 Km Geofence End Time",
     "40 Km Geofence Detention",
     "Lap Sharable Link",
+    # CONFIRMED against the real file: "Yesterday Completed Trips" doesn't
+    # have this column either -- drop it same as the other 12.
+    "Ulip Toll Count",
 ]
 
 ORG_LOCATION_MAP = {
@@ -219,10 +226,18 @@ def _load_api_vehicles(path: Path) -> pd.DataFrame:
 # Clean MTR (same as Reports 1 & 2)
 # ---------------------------------------------------------------------------
 
-def clean_mtr(df: pd.DataFrame) -> pd.DataFrame:
+def clean_mtr(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     df = df.copy()
     df = df.drop(columns=[c for c in MTR_DROP_COLUMNS if c in df.columns])
     df["Org Location"] = df["Org Location"].replace(ORG_LOCATION_MAP)
+
+    # Filter MTR to the explicit [start_date, end_date] range -- previously
+    # this just passed the uploaded file through unfiltered, assuming it was
+    # already pre-trimmed to the right window.
+    df["_inv_dt"] = pd.to_datetime(df["Invoice Date & Time"], errors="coerce")
+    mask = (df["_inv_dt"] >= start_date) & (df["_inv_dt"] <= end_date + " 23:59:59")
+    df = df[mask].drop(columns=["_inv_dt"])
+
     return df
 
 
@@ -699,10 +714,14 @@ def write_output(mtr, yesterday_completed, offline_trips, all_installation,
 # ---------------------------------------------------------------------------
 
 def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
-    # The web form's single date field IS data_date -- the day whose data
-    # this report covers (see module docstring's convention correction).
-    data_date = dates["report_date"]
-    log.info("Processing JKLC Daily Tracking Report for %s", data_date)
+    # start_date/end_date range, matching Reports 1 & 2's UI. end_date IS
+    # data_date -- the day whose data this report covers (Yesterday
+    # Completed Trips, Durg Dispatch, Offline Trips window end, Last Day
+    # AT Installation all key off it -- see module docstring's convention
+    # correction). start_date only bounds the MTR tab's own date filter.
+    start_date = dates["start_date"]
+    data_date = dates["end_date"]
+    log.info("Processing JKLC Daily Tracking Report for %s to %s", start_date, data_date)
 
     mtr_raw = _read_mtr(input_files["mtr_raw"])
     device_status = _load_device_status(input_files["device_status"])
@@ -712,7 +731,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     api_vehicles = _load_api_vehicles(input_files["api_vehicles"])
 
     try:
-        mtr = clean_mtr(mtr_raw)
+        mtr = clean_mtr(mtr_raw, start_date, data_date)
         yesterday_completed = build_yesterday_completed_trips(mtr, data_date)
         offline_trips = build_offline_trips(mtr, offline_dashboard, data_date)
         all_installation = build_all_installation(device_status, dashboard)
@@ -762,10 +781,11 @@ register(
                       "Trips, JKLC Offline Trips, All Installation, <Month> Installation, API Vehicles)",
         process_fn=process,
         implemented=True,
-        date_mode="single",
+        date_mode="range",
         notes=(
-            "Report Date = the day this report covers (matches real filename exactly, e.g. enter "
-            "2026-07-12 for the '12th July' report). Single-day snapshot, no cross-day accumulation. "
+            "End Date = the day this report covers (matches real filename exactly, e.g. enter "
+            "2026-07-12 for the '12th July' report). Start Date only bounds the MTR tab's own date "
+            "filter (previously MTR was passed through unfiltered). No cross-day accumulation. "
             "Validated against the real 12th July file: All Installation, Offline Trips (251/206/45), "
             "every AT-installation Summary metric, and Durg Dispatch (195 total, 163 AT-matched, "
             "off by 1 on Wheelseye/No-GPS) all match almost exactly. Durg Dispatch is NOT deduped by "
