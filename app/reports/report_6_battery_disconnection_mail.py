@@ -70,8 +70,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font
-from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, PatternFill
 
 from reports._stub_helpers import not_implemented_process
 from reports.errors import ReportProcessingError
@@ -288,36 +287,125 @@ def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFra
 
 
 # ---------------------------------------------------------------------------
-# Writer
+# Writer -- header fills/fonts/column widths extracted cell-by-cell from the
+# real Battery_Disconnection_Master_13_July_2026.xlsx (data logic untouched;
+# this section only affects display).
 # ---------------------------------------------------------------------------
 
-BOLD = Font(bold=True)
+from openpyxl.utils import get_column_letter
+from reports._report6_col_widths import MTR_COL_WIDTHS
+
+APTOS_10 = "Aptos Narrow"
+
+# Per-sheet header style: (fill color, font name, font size).
+SHEET_STYLES = {
+    "Consolidated": {"fill": "FFC000", "font": APTOS_10, "size": 10},
+    "Consolidated Shipment No.": {"fill": "8FAADC", "font": APTOS_10, "size": 10},
+    "Master": {"fill": "FFFF00", "font": APTOS_10, "size": 10},
+    "MTR": {"fill": "A9D18E", "font": "Calibri", "size": 11},
+}
+
+DATE_COLUMN_FORMATS = {
+    "Date": "mm-dd-yy",
+    "Location Date and Time": "m/d/yy h:mm",
+    "Invoice Date and Time": "m/d/yy h:mm",
+    "Billing date": "mm-dd-yy",
+}
+
+CONSOLIDATED_COL_WIDTHS = {
+    "Date": 10.11, "Vehicle No.": 12.33, "Transporter": 40.78, "Destination": 58.55,
+    "Event Lat.": 12.0, "Ship To Name": 71.78, "Shipment No.": 11.66,
+    "Location Area": 48.44, "Location Date and Time": 19.33, "Invoice Date and Time": 18.44,
+    "Plant Name": 46.66, "Status": 17.44, "Unloading Point": 22.33, "Ship to code": 11.0,
+    "Distribution Channel": 17.44,
+}
+CSN_COL_WIDTHS = {
+    "Mail Status": 9.89, "vehicle test": 68.22, "Date": 10.11, "Vehicle No.": 12.33,
+    "Transporter": 41.0, "Destination": 58.55, "Event Lat.": 12.0, "Ship To Name": 71.78,
+    "Shipment No.": 11.66, "Location Area": 48.44, "Location Date and Time": 19.33,
+    "Invoice Date and Time": 18.44, "Plant Name": 46.66, "Status": 17.44,
+    "Unloading Point": 22.33, "Ship to code": 11.0, "Distribution Channel": 17.44,
+    "STO/NON STO": 19.22, "Onward Status": 12.11, "shareable link": 72.33, "Test": 8.11,
+}
+MASTER_COL_WIDTHS = {
+    "Shipment No.": 11.89, "Invoice Number": 13.78, "Plant Name": 12.22,
+    "Transporter Name": 41.55, "Unloading point(ship-to-party)": 25.11,
+    "Billing date": 10.33, "Tracking Link": 74.22, "Sold To Code": 11.22,
+    "Name(Sold-To Party)": 51.33, "Distribution Channel": 17.44,
+    "Region(Ship To Party)": 18.55, "District(Ship-To Party)": 18.44,
+    "QTY (MT)": 8.44, "Freight loss": 10.11, "Last Date": 12.11, "Area": 39.89,
+}
+DEFAULT_COL_WIDTH = 13.0
+
+COL_WIDTHS_BY_SHEET = {
+    "Consolidated": CONSOLIDATED_COL_WIDTHS,
+    "Consolidated Shipment No.": CSN_COL_WIDTHS,
+    "Master": MASTER_COL_WIDTHS,
+    "MTR": MTR_COL_WIDTHS,
+}
 
 
 def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
     """Plain (non write_only) Workbook + df.itertuples() bulk append --
-    matches the fast pattern used in Reports 2 & 3. write_only mode was
-    tried first for its much lower memory use (96MB vs 467MB locally), but
-    it was ~2.3x SLOWER (174s vs 76s) and still 502'd in production at the
-    same ~54s mark as the plain-Workbook version's untested prediction --
-    that repeatable ~54s failure point regardless of a 5x memory difference
-    points to a time-based ceiling on this host, not an OOM kill, so raw
-    speed is what actually matters here, not memory headroom.
+    matches the fast pattern used in Reports 2 & 3 (write_only mode was
+    tried and reverted, see git history: slower in practice here, not worth
+    its memory saving on this specific workload). Header fill/font, column
+    widths, and date number-formats are matched to the real file below; no
+    freeze panes -- the real file doesn't use them either, despite the
+    original script adding freeze_panes="A2" on every tab.
+
+    Deliberately NOT setting a per-row data font (the real file uses "Aptos
+    Narrow" 10pt on some sheets' data rows, openpyxl's default is Calibri
+    11): looping ws.cell() to style every one of ~1.45M data cells is
+    exactly the O(n) styling cost that already made this report's write
+    step marginal on Render (see the write_only/plain-Workbook history
+    above) -- not worth re-risking a report already on hold for being too
+    slow, for a data-row font that doesn't affect any actual figures.
     """
+    style = SHEET_STYLES.get(sheet_name, {"fill": None, "font": "Calibri", "size": 11})
+    header_font = Font(name=style["font"], size=style["size"], bold=True)
+    header_fill = PatternFill(fill_type="solid", fgColor=style["fill"]) if style["fill"] else None
+    col_widths = COL_WIDTHS_BY_SHEET.get(sheet_name, {})
+
     ws = wb.create_sheet(sheet_name)
-    ws.append(list(df.columns))
-    for cell in ws[1]:
-        cell.font = BOLD
+    columns = list(df.columns)
+    ws.append(columns)
+    for col_idx, name in enumerate(columns, start=1):
+        cell = ws.cell(1, col_idx)
+        cell.font = header_font
+        if header_fill:
+            cell.fill = header_fill
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = col_widths.get(str(name).strip(), DEFAULT_COL_WIDTH)
+
+    date_col_idxs = {i: DATE_COLUMN_FORMATS[name] for i, name in enumerate(columns) if name in DATE_COLUMN_FORMATS}
+
+    row_idx = 1
     for row in df.itertuples(index=False):
+        row_idx += 1
         ws.append(row)
-    ws.freeze_panes = "A2"
+        for idx, fmt in date_col_idxs.items():
+            ws.cell(row_idx, idx + 1).number_format = fmt
     return ws
 
 
 def _write_table_tab(wb, rows: list):
+    """Table is a tiny (~17-row) scratch/lookup helper, so per-cell styling
+    here is cheap and safe (unlike the large data sheets above). Matches
+    the real file: column A (labels) bold + yellow fill on every row,
+    column B (values) plain.
+    """
     ws = wb.create_sheet("Table")
-    for row in rows:
+    label_font = Font(bold=True)
+    label_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+    for row_idx, row in enumerate(rows, start=1):
         ws.append(row)
+        cell = ws.cell(row_idx, 1)
+        cell.font = label_font
+        cell.fill = label_fill
+    ws.column_dimensions["A"].width = 27.33
+    ws.column_dimensions["B"].width = 75.11
+    return ws
     return ws
 
 
