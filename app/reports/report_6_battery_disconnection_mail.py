@@ -501,8 +501,17 @@ register(
         ],
         output_pattern="Battery_Disconnection_Master_<date>.xlsx (5 tabs: Consolidated, Consolidated "
                       "Shipment No., Table, Master, MTR)",
+        # implemented=False is COSMETIC ONLY here -- process_fn is still the
+        # real, working `process` function below, not the not_implemented
+        # stub. main.py's /generate route never checks `implemented`; it
+        # only drives the "not yet implemented" badge/text on the report
+        # page. Per explicit instruction: show the stub label (since this
+        # report is still unproven on Render's free tier and shouldn't be
+        # advertised as ready), but if someone uploads and clicks Generate
+        # anyway, it should still produce a correct, fully-working output --
+        # which this achieves, since the real process_fn is still wired in.
         process_fn=process,
-        implemented=True,
+        implemented=False,
         date_mode="single",
         notes=(
             "Stateful report -- needs the PREVIOUS day's Master workbook as an input each run "
