@@ -86,20 +86,11 @@
   },
   "6": {
     "name": "Battery Disconnection Mail Creation",
-    "notes": "Output is individual mail draft(s) per shipment, not a single spreadsheet.",
-    "output_pattern": "battery_disconnection_mail_drafts_<date>.eml",
+    "notes": "",
+    "output_pattern": "",
     "enabled": true,
     "order": 6,
-    "slots": {
-      "mtr_raw": {
-        "label": "MTR Raw",
-        "hint": "raw_mtr_-_<timestamp>.csv"
-      },
-      "route_tracker_check": {
-        "label": "Route Tracker Check",
-        "hint": "route_tracker_check_<date>.xlsx"
-      }
-    }
+    "slots": {}
   },
   "7": {
     "name": "Control Tower Tracker",

@@ -69,6 +69,7 @@ from pathlib import Path
 
 import openpyxl
 import pandas as pd
+from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils.dataframe import dataframe_to_rows
 
@@ -147,9 +148,7 @@ def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
 
 
 def _load_prev_master_tabs(path: Path):
-    """Load the 3 tabs we carry forward from the previous Master workbook.
-    ('Table' tab is copied byte-for-byte later via openpyxl, not through pandas.)
-    """
+    """Load the 3 tabs we carry forward from the previous Master workbook."""
     try:
         consolidated = pd.read_excel(path, sheet_name="Consolidated")
         csn = pd.read_excel(path, sheet_name="Consolidated Shipment No.")
@@ -161,6 +160,29 @@ def _load_prev_master_tabs(path: Path):
             "Shipment No., Master tabs)."
         ) from exc
     return consolidated, csn, master
+
+
+def _load_table_tab_rows(path: Path):
+    """Read the 'Table' tab's raw values only (small scratch/lookup helper,
+    per the reference doc -- values matter, not exact formatting), using
+    read_only mode so we never load the workbook's other, much larger sheets
+    (Consolidated, MTR) into memory as full rich cell objects.
+
+    openpyxl.load_workbook(path) (full/writable mode) on a growing multi-tab
+    workbook measured 1.6GB peak memory and 188s locally -- far past
+    Render's free-tier limits, and the actual cause of the 502s seen live.
+    Read-only mode + only touching the one small tab we need avoids that.
+    """
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        raise ReportProcessingError(f"Couldn't read '{path.name}': {exc}") from exc
+    if "Table" not in wb.sheetnames:
+        return []
+    ws = wb["Table"]
+    rows = [list(row) for row in ws.iter_rows(values_only=True)]
+    wb.close()
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -269,14 +291,19 @@ def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFra
 # ---------------------------------------------------------------------------
 
 def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     for row in dataframe_to_rows(df, index=False, header=True):
         ws.append(row)
     for cell in ws[1]:
         cell.font = Font(bold=True)
     ws.freeze_panes = "A2"
+    return ws
+
+
+def _write_table_tab(wb, rows: list):
+    ws = wb.create_sheet("Table")
+    for row in rows:
+        ws.append(row)
     return ws
 
 
@@ -292,6 +319,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     mtr_lookup, mtr_full = _load_mtr_lookup(input_files["mtr_raw"])
     new_raw = _load_new_consolidated_report(input_files["new_consolidated"])
     prev_consolidated, prev_csn, prev_master = _load_prev_master_tabs(input_files["prev_master"])
+    table_rows = _load_table_tab_rows(input_files["prev_master"])
 
     try:
         new_consolidated_rows = build_new_consolidated_rows(new_raw, report_date)
@@ -318,25 +346,25 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
         len(new_master_rows), len(review_queue),
     )
 
-    # Start from the previous file to keep the 'Table' tab intact untouched.
-    wb = openpyxl.load_workbook(input_files["prev_master"])
+    # Build a FRESH workbook rather than mutating the previous file's loaded
+    # object -- loading the previous file in full/writable mode (to preserve
+    # its 'Table' tab) pulled its huge Consolidated/MTR tabs into memory as
+    # rich cell objects too, measuring 1.6GB peak / 188s locally. The 'Table'
+    # tab's raw values were already pulled separately via read_only mode
+    # (see _load_table_tab_rows), so nothing is lost by starting fresh here.
+    wb = Workbook()
+    wb.remove(wb.active)
     _write_sheet(wb, "Consolidated", full_consolidated)
     _write_sheet(wb, "Consolidated Shipment No.", full_csn)
+    _write_table_tab(wb, table_rows)
     _write_sheet(wb, "Master", full_master)
 
-    # Refresh MTR tab wholesale.
-    if "MTR" in wb.sheetnames:
-        del wb["MTR"]
     ws_mtr = wb.create_sheet("MTR")
     for row in dataframe_to_rows(mtr_full.reset_index(), index=False, header=True):
         ws_mtr.append(row)
     for cell in ws_mtr[1]:
         cell.font = Font(bold=True)
     ws_mtr.freeze_panes = "A2"
-
-    # Reorder tabs to match the real workbook.
-    order = ["Consolidated", "Consolidated Shipment No.", "Table", "Master", "MTR"]
-    wb._sheets = [wb[name] for name in order if name in wb.sheetnames]
 
     output_path = output_dir / f"Battery_Disconnection_Master_{report_date_str}.xlsx"
     wb.save(output_path)
