@@ -70,6 +70,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font
 from openpyxl.utils.dataframe import dataframe_to_rows
 
@@ -290,12 +291,30 @@ def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFra
 # Writer
 # ---------------------------------------------------------------------------
 
+BOLD = Font(bold=True)
+
+
 def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
+    """write_only mode: no Cell objects are retained in memory as rows are
+    appended (unlike a normal Workbook, where every appended cell stays a
+    live object until save()) -- critical for Consolidated/MTR, which are
+    tens of thousands of rows and grow every day. The tradeoff is that
+    write-only sheets can only be appended to, never re-read or randomly
+    accessed (ws.cell(), ws[1], etc. don't work), so the header row's bold
+    styling has to be built as WriteOnlyCell objects up front instead of
+    styled after the fact.
+    """
     ws = wb.create_sheet(sheet_name)
-    for row in dataframe_to_rows(df, index=False, header=True):
+    rows_iter = dataframe_to_rows(df, index=False, header=True)
+    header = next(rows_iter)
+    header_cells = []
+    for v in header:
+        cell = WriteOnlyCell(ws, value=v)
+        cell.font = BOLD
+        header_cells.append(cell)
+    ws.append(header_cells)
+    for row in rows_iter:
         ws.append(row)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
     ws.freeze_panes = "A2"
     return ws
 
@@ -346,25 +365,26 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
         len(new_master_rows), len(review_queue),
     )
 
-    # Build a FRESH workbook rather than mutating the previous file's loaded
-    # object -- loading the previous file in full/writable mode (to preserve
-    # its 'Table' tab) pulled its huge Consolidated/MTR tabs into memory as
-    # rich cell objects too, measuring 1.6GB peak / 188s locally. The 'Table'
-    # tab's raw values were already pulled separately via read_only mode
-    # (see _load_table_tab_rows), so nothing is lost by starting fresh here.
-    wb = Workbook()
-    wb.remove(wb.active)
+    # Build a FRESH, write_only workbook rather than mutating the previous
+    # file's loaded object. Two separate memory issues, two fixes:
+    #  1. Loading the previous file in full/writable mode (just to preserve
+    #     its small 'Table' tab) pulled its huge Consolidated/MTR tabs into
+    #     memory as rich cell objects too -- measured 1.6GB peak / 188s
+    #     locally. Fixed by reading Table's values separately via read_only
+    #     mode (see _load_table_tab_rows) and starting fresh here.
+    #  2. A normal (non-write_only) Workbook keeps every appended Cell as a
+    #     live object until save() -- still expensive for tens of thousands
+    #     of rows. write_only=True streams rows straight to the file's XML
+    #     writer and doesn't retain them, cutting real memory further. The
+    #     tradeoff: write-only sheets can only be appended to, never
+    #     re-read/randomly accessed -- see _write_sheet's docstring for how
+    #     that affects header-row bolding.
+    wb = Workbook(write_only=True)
     _write_sheet(wb, "Consolidated", full_consolidated)
     _write_sheet(wb, "Consolidated Shipment No.", full_csn)
     _write_table_tab(wb, table_rows)
     _write_sheet(wb, "Master", full_master)
-
-    ws_mtr = wb.create_sheet("MTR")
-    for row in dataframe_to_rows(mtr_full.reset_index(), index=False, header=True):
-        ws_mtr.append(row)
-    for cell in ws_mtr[1]:
-        cell.font = Font(bold=True)
-    ws_mtr.freeze_panes = "A2"
+    _write_sheet(wb, "MTR", mtr_full.reset_index())
 
     output_path = output_dir / f"Battery_Disconnection_Master_{report_date_str}.xlsx"
     wb.save(output_path)
