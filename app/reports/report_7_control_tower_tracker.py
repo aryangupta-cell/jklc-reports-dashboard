@@ -240,6 +240,12 @@ CENTER = Alignment(horizontal="center", vertical="center")
 DEFAULT_COL_WIDTH = 13.0
 
 
+# Cosmetic-only: forces text display so long digit strings like Transporter
+# Number never render in scientific notation -- matches what Khagash is used
+# to seeing, doesn't affect correctness.
+TEXT_FORMAT_COLUMNS = {"Transporter Number"}
+
+
 def _write_base_sheet(wb, df: pd.DataFrame):
     ws = wb.create_sheet("Base", 0)
     columns = list(df.columns)
@@ -254,8 +260,14 @@ def _write_base_sheet(wb, df: pd.DataFrame):
         letter = get_column_letter(col_idx)
         ws.column_dimensions[letter].width = BASE_COL_WIDTHS.get(str(name).strip(), DEFAULT_COL_WIDTH)
 
+    text_col_idxs = [i for i, name in enumerate(columns) if name in TEXT_FORMAT_COLUMNS]
+
+    row_idx = 1
     for row in df.itertuples(index=False):
+        row_idx += 1
         ws.append(row)
+        for idx in text_col_idxs:
+            ws.cell(row_idx, idx + 1).number_format = "@"
     return ws
 
 

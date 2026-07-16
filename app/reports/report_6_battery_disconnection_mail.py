@@ -304,11 +304,19 @@ SHEET_STYLES = {
     "MTR": {"fill": "A9D18E", "font": "Calibri", "size": 11},
 }
 
+# Despite the name, this is really "column name -> number_format override" --
+# mostly dates, plus one cosmetic exception below.
 DATE_COLUMN_FORMATS = {
     "Date": "mm-dd-yy",
     "Location Date and Time": "m/d/yy h:mm",
     "Invoice Date and Time": "m/d/yy h:mm",
     "Billing date": "mm-dd-yy",
+    # Forces text display so long digit strings never render in scientific
+    # notation -- matches what Khagash is used to seeing, doesn't affect
+    # correctness. No pd.to_datetime() side effect here (unlike Report 3's
+    # equivalent dict) since this report doesn't pre-parse date_col_idxs
+    # entries before writing -- only number_format gets applied.
+    "Transporter Number": "@",
 }
 
 CONSOLIDATED_COL_WIDTHS = {

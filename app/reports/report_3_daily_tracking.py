@@ -649,6 +649,13 @@ MTR_FAMILY_DATE_COLUMNS = {
     "Dest Reporting Time": "m/d/yy h:mm",
     "Trip AddTime": "m/d/yy h:mm",
 }
+
+# Cosmetic-only, does NOT go through the date_columns machinery (that path
+# runs pd.to_datetime() on every entry, which would corrupt a phone-number
+# column). Just forces text display so long digit strings like Transporter
+# Number never render in scientific notation -- matches what Khagash is
+# used to seeing, doesn't affect correctness.
+MTR_FAMILY_TEXT_COLUMNS = {"Transporter Number"}
 ALL_INSTALLATION_DATE_COLUMNS = {"Veh Add Date": "d-mmm-yy"}
 
 DEFAULT_COL_WIDTH = 13.0
@@ -668,7 +675,7 @@ SHEET_HEADER_STYLES = {
 
 
 def _write_data_sheet(wb, sheet_name: str, df: pd.DataFrame, *, col_widths: dict = None,
-                      date_columns: dict = None, header_style_key: str = None):
+                      date_columns: dict = None, header_style_key: str = None, text_columns: set = None):
     """Fast bulk write via ws.append (avoids a slow pandas-then-reload round
     trip), with header styling / column widths / date number-formats matched
     to the real master file. Matched by column NAME (not position), since
@@ -685,6 +692,7 @@ def _write_data_sheet(wb, sheet_name: str, df: pd.DataFrame, *, col_widths: dict
     """
     col_widths = col_widths or {}
     date_columns = date_columns or {}
+    text_columns = text_columns or set()
     style = SHEET_HEADER_STYLES.get(header_style_key or sheet_name, SHEET_HEADER_STYLES["MTR"])
 
     ws = wb.create_sheet(sheet_name)
@@ -706,6 +714,7 @@ def _write_data_sheet(wb, sheet_name: str, df: pd.DataFrame, *, col_widths: dict
         ws.column_dimensions[letter].width = col_widths.get(name.strip(), DEFAULT_COL_WIDTH)
 
     date_col_idxs = {i: fmt for i, name in enumerate(columns) if (fmt := date_columns.get(name))}
+    text_col_idxs = [i for i, name in enumerate(columns) if name in text_columns]
 
     # Parse date columns ONCE, vectorized, before the row loop. Calling
     # pd.to_datetime() per-scalar inside the loop (the first version of this
@@ -730,6 +739,8 @@ def _write_data_sheet(wb, sheet_name: str, df: pd.DataFrame, *, col_widths: dict
         if date_col_idxs:
             for idx, fmt in date_col_idxs.items():
                 ws.cell(row_idx, idx + 1).number_format = fmt
+        for idx in text_col_idxs:
+            ws.cell(row_idx, idx + 1).number_format = "@"
         if needs_data_font:
             for col_idx in range(1, len(columns) + 1):
                 ws.cell(row_idx, col_idx).font = data_font
@@ -745,9 +756,11 @@ def write_output(mtr, yesterday_completed, offline_trips, all_installation,
 
     _write_summary_sheet(wb, summary, data_date)
     _write_data_sheet(wb, "MTR", mtr,
-                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS)
+                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS,
+                      text_columns=MTR_FAMILY_TEXT_COLUMNS)
     _write_data_sheet(wb, "Yesterday Completed Trips", yesterday_completed,
-                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS)
+                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS,
+                      text_columns=MTR_FAMILY_TEXT_COLUMNS)
     _write_data_sheet(wb, "API Vehicles", api_vehicles)
     _write_data_sheet(wb, month_tab_name, month_installation,
                       col_widths=ALL_INSTALLATION_COL_WIDTHS, date_columns=ALL_INSTALLATION_DATE_COLUMNS,
@@ -755,7 +768,8 @@ def write_output(mtr, yesterday_completed, offline_trips, all_installation,
     _write_data_sheet(wb, "All Installation", all_installation,
                       col_widths=ALL_INSTALLATION_COL_WIDTHS, date_columns=ALL_INSTALLATION_DATE_COLUMNS)
     _write_data_sheet(wb, "JKLC Offline Trips", offline_trips,
-                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS)
+                      col_widths=MTR_FAMILY_COL_WIDTHS, date_columns=MTR_FAMILY_DATE_COLUMNS,
+                      text_columns=MTR_FAMILY_TEXT_COLUMNS)
 
     wb.save(output_path)
 
