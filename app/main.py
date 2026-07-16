@@ -68,6 +68,25 @@ def _collect_dates(form, date_mode: str) -> dict:
     return {}
 
 
+def _collect_extra_number_fields(form, extra_number_fields) -> dict:
+    """Optional extra number inputs a report declares (e.g. Report 3's "Days
+    back") land in the same `dates` dict process_fn already receives, keyed
+    by field.key. Blank/invalid input falls back to the field's default
+    rather than erroring — these are meant to be optional conveniences, not
+    required inputs."""
+    result = {}
+    for extra_field in extra_number_fields:
+        raw = form.get(extra_field.key)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = extra_field.default
+        if value < extra_field.min_value:
+            value = extra_field.min_value
+        result[extra_field.key] = value
+    return result
+
+
 @app.post("/report/{report_id}/generate")
 async def generate(request: Request, report_id: str):
     meta = next((r for r in get_effective_reports() if r.id == report_id), None)
@@ -85,6 +104,7 @@ async def generate(request: Request, report_id: str):
         dates = _collect_dates(form, meta.date_mode)
     except ReportProcessingError as exc:
         return templates.TemplateResponse(request, "report.html", {"report": meta, "error": str(exc)})
+    dates.update(_collect_extra_number_fields(form, meta.extra_number_fields))
 
     # Everything lives in a per-request temp dir and is gone by the time this
     # handler returns — the generated file is read into memory and sent back

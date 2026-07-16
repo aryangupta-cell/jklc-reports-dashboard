@@ -52,6 +52,14 @@
     </div>
     {% endif %}
 
+    {% for extra in report.extra_number_fields %}
+    <div class="form-row">
+      <label for="{{ extra.key }}">{{ extra.label }}</label>
+      <input type="number" id="{{ extra.key }}" name="{{ extra.key }}" value="{{ extra.default }}" min="{{ extra.min_value }}">
+      {% if extra.hint %}<p class="hint">{{ extra.hint }}</p>{% endif %}
+    </div>
+    {% endfor %}
+
     <button type="submit">Generate report</button>
   </form>
 </div>

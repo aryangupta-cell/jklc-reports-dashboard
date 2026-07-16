@@ -104,7 +104,7 @@ from openpyxl.utils import get_column_letter
 
 from reports._report3_col_widths_mtr import MTR_FAMILY_COL_WIDTHS, ALL_INSTALLATION_COL_WIDTHS
 from reports.errors import ReportProcessingError
-from reports.registry import InputSlot, ReportMeta, register
+from reports.registry import ExtraNumberField, InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
 
@@ -245,10 +245,19 @@ def clean_mtr(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
 # Yesterday Completed Trips
 # ---------------------------------------------------------------------------
 
-def build_yesterday_completed_trips(mtr: pd.DataFrame, data_date: str) -> pd.DataFrame:
+def build_yesterday_completed_trips(mtr: pd.DataFrame, data_date: str, days_back: int = 1) -> pd.DataFrame:
+    """days_back=1 (default) reproduces the original, already-validated
+    behavior exactly: Stamp Time date == data_date, no range. Set higher
+    only for late/catch-up runs (per explicit instruction) -- e.g.
+    days_back=3 pulls the 3 days ending at data_date inclusive, covering 2
+    additional prior days Khagash's team sometimes has to catch up on when
+    a run is late. Confirmed this is a real-world catch-up scenario, not a
+    logic bug in the single-day filter -- see module docstring.
+    """
     df = mtr.copy()
     df["_stamp_dt"] = pd.to_datetime(df["Stamp Time"], errors="coerce")
-    df = df[df["_stamp_dt"].dt.date.astype(str) == data_date].copy()
+    range_start = (pd.to_datetime(data_date) - pd.Timedelta(days=days_back - 1)).strftime("%Y-%m-%d")
+    df = df[(df["_stamp_dt"].dt.date.astype(str) >= range_start) & (df["_stamp_dt"].dt.date.astype(str) <= data_date)].copy()
 
     def nonsto(dc):
         dc = str(dc).strip()
@@ -721,7 +730,12 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     # correction). start_date only bounds the MTR tab's own date filter.
     start_date = dates["start_date"]
     data_date = dates["end_date"]
-    log.info("Processing JKLC Daily Tracking Report for %s to %s", start_date, data_date)
+    # Optional, defaults to 1 (today's existing behavior, unchanged) -- see
+    # build_yesterday_completed_trips's docstring. Only ever set higher for
+    # late/catch-up runs; no other tab or report is affected by this value.
+    yesterday_days_back = dates.get("yesterday_days_back", 1)
+    log.info("Processing JKLC Daily Tracking Report for %s to %s (yesterday_days_back=%d)",
+             start_date, data_date, yesterday_days_back)
 
     mtr_raw = _read_mtr(input_files["mtr_raw"])
     device_status = _load_device_status(input_files["device_status"])
@@ -732,7 +746,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
 
     try:
         mtr = clean_mtr(mtr_raw, start_date, data_date)
-        yesterday_completed = build_yesterday_completed_trips(mtr, data_date)
+        yesterday_completed = build_yesterday_completed_trips(mtr, data_date, yesterday_days_back)
         offline_trips = build_offline_trips(mtr, offline_dashboard, data_date)
         all_installation = build_all_installation(device_status, dashboard)
         month_installation = build_month_installation(all_installation, data_date)
@@ -782,6 +796,20 @@ register(
         process_fn=process,
         implemented=True,
         date_mode="range",
+        extra_number_fields=[
+            ExtraNumberField(
+                key="yesterday_days_back",
+                label="Days back (Yesterday Completed Trips only)",
+                default=1,
+                min_value=1,
+                hint=(
+                    "1 = yesterday only (normal case, default). Higher = pulls that many days "
+                    "ending at End Date -- e.g. 3 covers the 3 days up to and including End Date, "
+                    "for late/catch-up runs. Only affects the Yesterday Completed Trips tab; every "
+                    "other tab is unaffected."
+                ),
+            ),
+        ],
         notes=(
             "End Date = the day this report covers (matches real filename exactly, e.g. enter "
             "2026-07-12 for the '12th July' report). Start Date only bounds the MTR tab's own date "

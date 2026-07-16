@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Literal
 
@@ -17,6 +17,20 @@ class InputSlot:
 
 
 @dataclass
+class ExtraNumberField:
+    """An optional extra number input on a report's page, alongside its date
+    field(s) — e.g. Report 3's "Days back" control. Rendered generically by
+    report.html; process_fn reads it from the `dates` dict by `key`, same
+    dict the date fields land in. Not file-based, so it's separate from
+    InputSlot; not date-typed, so it's separate from date_mode."""
+    key: str  # stable identifier — process_fn reads dates[key] by this
+    label: str
+    default: int
+    min_value: int = 1
+    hint: str = ""  # short explanatory text shown under the field
+
+
+@dataclass
 class ReportMeta:
     id: str  # stable identifier, matches process_fn wiring — NOT editable via Settings
     name: str  # UI-editable default
@@ -26,6 +40,7 @@ class ReportMeta:
     implemented: bool = True  # code-level: does process_fn do real work yet?
     notes: str = ""  # UI-editable default
     date_mode: DateMode = "range"
+    extra_number_fields: List[ExtraNumberField] = field(default_factory=list)
 
 
 REPORTS: Dict[str, ReportMeta] = {}
