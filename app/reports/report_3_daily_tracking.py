@@ -222,6 +222,29 @@ def _load_api_vehicles(path: Path) -> pd.DataFrame:
         raise ReportProcessingError(f"Couldn't read API Vehicles file '{path.name}': {exc}") from exc
 
 
+def clean_api_vehicles(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """CORRECTED: the reference doc/original script assumed this tab was
+    the raw API Vehicles export passed through as-is ("no logic needed").
+    Comparing against the real 12th July file disproved that -- the real
+    tab has 5 renamed columns (S.No., Vehicle No, Plant, Provider, Add
+    Date), not the raw file's 6 (fname, transporter_name, regno,
+    apiprovider, addtime, modified_time). Confirmed by matching sample
+    values exactly: regno -> Vehicle No, fname -> Plant, apiprovider ->
+    Provider, addtime -> Add Date; transporter_name and modified_time are
+    dropped entirely; S.No. is a new 1-based row serial, not from the
+    source file.
+    """
+    df = raw_df.copy()
+    out = pd.DataFrame({
+        "S.No.": range(1, len(df) + 1),
+        "Vehicle No": df["regno"],
+        "Plant": df["fname"],
+        "Provider": df["apiprovider"],
+        "Add Date": df["addtime"],
+    })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Clean MTR (same as Reports 1 & 2)
 # ---------------------------------------------------------------------------
@@ -330,24 +353,43 @@ def build_offline_trips(mtr: pd.DataFrame, offline_dashboard: pd.DataFrame,
 # All Installation — validated EXACT (8684 = 8684 against real 12th July)
 # ---------------------------------------------------------------------------
 
+ALL_INSTALLATION_OUTPUT_COLS = ["Company", "Vehicles", "IMEI", "Mobile Num", "Installation", "Veh Add Date"]
+
+
 def build_all_installation(device_status: pd.DataFrame, dashboard: pd.DataFrame) -> pd.DataFrame:
     ds = device_status.copy()
     ds["IMEI"] = ds["IMEI"].astype(str)
     dashboard = dashboard.copy()
     dashboard["Imei"] = dashboard["Imei"].astype(str)
     dash_imeis = set(dashboard["Imei"])
-    return ds[ds["IMEI"].isin(dash_imeis)].copy()
+    matched = ds[ds["IMEI"].isin(dash_imeis)].copy()
+
+    # CORRECTED: previously kept every raw Device Status column (19 cols:
+    # Company Id, Code, Autovid, Group, VehicleId, Port, Recovery Date,
+    # First Data Date, Last Data Date, Specifications, Battery,
+    # Reflections, Device Type, etc.). Comparing against the real 12th
+    # July file showed it only keeps 6 of those, plus a new 1-based row
+    # serial ("S. No.") that isn't in the source data at all.
+    out = matched[ALL_INSTALLATION_OUTPUT_COLS].reset_index(drop=True)
+    out.insert(0, "S. No.", range(1, len(out) + 1))
+    return out
 
 
 def build_month_installation(all_installation: pd.DataFrame, data_date: str) -> pd.DataFrame:
     """SOP step 3: All Installation filtered to the current month.
-    Tab is named dynamically by the caller, e.g. "July '26 Installation"."""
-    df = all_installation.copy()
+    Tab is named dynamically by the caller, e.g. "July '26 Installation".
+    CONFIRMED: S. No. is independently renumbered 1..N for this subset
+    (checked the real file: 74 rows, S. No. goes 1..74) -- not carried over
+    from All Installation's own numbering.
+    """
+    df = all_installation.drop(columns=["S. No."]).copy()
     df["_add_dt"] = pd.to_datetime(df["Veh Add Date"], errors="coerce")
     month_start = pd.to_datetime(data_date).replace(day=1)
     month_end = month_start + pd.offsets.MonthEnd(0)
     mask = (df["_add_dt"] >= month_start) & (df["_add_dt"] <= month_end.strftime("%Y-%m-%d") + " 23:59:59")
-    return df[mask].drop(columns=["_add_dt"])
+    out = df[mask].drop(columns=["_add_dt"]).reset_index(drop=True)
+    out.insert(0, "S. No.", range(1, len(out) + 1))
+    return out
 
 
 def month_installation_tab_name(data_date: str) -> str:
@@ -753,6 +795,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
         month_tab_name = month_installation_tab_name(data_date)
         durg_dispatch = build_durg_dispatch(mtr, device_status, master_entry, all_installation, data_date)
         summary = build_summary(yesterday_completed, offline_trips, all_installation, durg_dispatch, data_date)
+        api_vehicles = clean_api_vehicles(api_vehicles)
     except KeyError as exc:
         raise ReportProcessingError(
             f"Expected column {exc} not found. Check each file was uploaded to the "
