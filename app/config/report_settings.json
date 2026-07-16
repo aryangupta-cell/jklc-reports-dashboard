@@ -80,24 +80,11 @@
   },
   "7": {
     "name": "Control Tower Tracker",
-    "notes": "On hold.",
-    "output_pattern": "Control_Tower_Tracker_<date>.xlsx",
-    "enabled": false,
+    "notes": "",
+    "output_pattern": "",
+    "enabled": true,
     "order": 7,
-    "slots": {
-      "mtr_raw_yesterday": {
-        "label": "MTR Raw (yesterday)",
-        "hint": "raw_mtr_-_<timestamp>.csv"
-      },
-      "dump_code_list": {
-        "label": "Client Dump-Code List",
-        "hint": "dump_code_list_<date>.xlsx"
-      },
-      "allowance_40km": {
-        "label": "40km Allowance Report",
-        "hint": "40km_allowance_<date>.xlsx"
-      }
-    }
+    "slots": {}
   },
   "8": {
     "name": "Freight Deviation Mail",
