@@ -65,19 +65,10 @@
   "5": {
     "name": "JKLC AT Fix On-Trip Vehicle Status",
     "notes": "",
-    "output_pattern": "JKLC_AT_Fix_Ontrip_Vehicles_Status_<date>.xlsx",
+    "output_pattern": "",
     "enabled": true,
     "order": 5,
-    "slots": {
-      "daily_tracking_output": {
-        "label": "Daily Tracking Report Output",
-        "hint": "JKLC_Daily_Tracking_Report_<date>.xlsx"
-      },
-      "whatsapp_remarks": {
-        "label": "WhatsApp Technician Remarks",
-        "hint": "technician_remarks_<date>.xlsx"
-      }
-    }
+    "slots": {}
   },
   "6": {
     "name": "Battery Disconnection Mail Creation",
