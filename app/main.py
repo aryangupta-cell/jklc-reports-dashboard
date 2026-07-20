@@ -137,6 +137,26 @@ async def generate(request: Request, report_id: str):
             return templates.TemplateResponse(request, "report.html", {"report": meta, "error": str(exc)})
         except ReportProcessingError as exc:
             return templates.TemplateResponse(request, "report.html", {"report": meta, "error": str(exc)})
+        except KeyError as exc:
+            # Safety net: most reports already catch KeyError internally and
+            # raise a clearer ReportProcessingError (see each report's own
+            # process_fn) — this only fires for the ones that don't, or for
+            # a KeyError raised outside that internal try block. Without
+            # this, the column name gets lost in the generic "something
+            # went wrong" message below. exc.args[0] is the missing column
+            # name (or a list of names, for a multi-column selection).
+            missing = exc.args[0] if exc.args else str(exc)
+            log.exception("Missing column in report %s (%s)", report_id, meta.name)
+            return templates.TemplateResponse(
+                request,
+                "report.html",
+                {
+                    "report": meta,
+                    "error": f"'{meta.name}' expected a column that wasn't found in the uploaded "
+                    f"file(s): {missing}. Check each file was uploaded to the correct input slot, "
+                    "and that it's the right kind of file for this report.",
+                },
+            )
         except Exception:
             log.exception("Unexpected error processing report %s", report_id)
             return templates.TemplateResponse(
