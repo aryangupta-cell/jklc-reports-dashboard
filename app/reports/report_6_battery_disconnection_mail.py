@@ -201,9 +201,11 @@ def _load_prev_master_tabs(path: Path):
 
 def _load_table_tab_rows(path: Path):
     """Read the 'Table' tab's raw cell contents -- FORMULAS included, not
-    just their cached values -- using read_only mode so we never load the
-    workbook's other, much larger sheets (Consolidated, MTR) into memory as
-    full rich cell objects.
+    just their cached values, AND each cell's number_format -- using
+    read_only mode so we never load the workbook's other, much larger
+    sheets (Consolidated, MTR) into memory as full rich cell objects.
+
+    Returns a list of rows, each a list of (value, number_format) tuples.
 
     data_only=False (not True) is deliberate: the real Table tab's rows are
     almost entirely XLOOKUP formulas referencing the Master tab (row 1's
@@ -213,6 +215,14 @@ def _load_table_tab_rows(path: Path):
     the formulas on the very first run through this pipeline. Confirmed
     read_only=True still returns formula text (as a plain string) rather
     than a computed value when data_only=False.
+
+    number_format matters here too: 2 of these rows (Billing date, Last
+    Date) are date-valued XLOOKUPs formatted as "m/d/yy h:mm" in the real
+    file -- reading only cell.value (via values_only=True) drops that,
+    which otherwise makes Excel display the recalculated result as a raw
+    date serial number (e.g. 46212.75) instead of a date/time once the
+    formula re-evaluates against this run's freshly written Master tab.
+    Confirmed read_only mode still exposes number_format per cell.
 
     openpyxl.load_workbook(path) (full/writable mode) on a growing multi-tab
     workbook measured 1.6GB peak memory and 188s locally -- far past
@@ -226,7 +236,7 @@ def _load_table_tab_rows(path: Path):
     if "Table" not in wb.sheetnames:
         return []
     ws = wb["Table"]
-    rows = [list(row) for row in ws.iter_rows(values_only=True)]
+    rows = [[(cell.value, cell.number_format) for cell in row] for row in ws.iter_rows()]
     wb.close()
     return rows
 
@@ -532,13 +542,21 @@ def _write_table_tab(wb, rows: list):
     """Table is a tiny (~17-row) scratch/lookup helper, so per-cell styling
     here is cheap and safe (unlike the large data sheets above). Matches
     the real file: column A (labels) bold + yellow fill on every row,
-    column B (values) plain.
+    column B (values/formulas) plain but keeping whatever number_format the
+    source cell had (see _load_table_tab_rows -- 2 rows are date-valued
+    XLOOKUPs that need their "m/d/yy h:mm" format preserved, or Excel shows
+    the recalculated result as a raw date serial number instead).
+
+    `rows` is a list of rows, each a list of (value, number_format) tuples,
+    as produced by _load_table_tab_rows.
     """
     ws = wb.create_sheet("Table")
     label_font = Font(bold=True)
     label_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
     for row_idx, row in enumerate(rows, start=1):
-        ws.append(row)
+        ws.append([value for value, _ in row])
+        for col_idx, (_, number_format) in enumerate(row, start=1):
+            ws.cell(row_idx, col_idx).number_format = number_format
         cell = ws.cell(row_idx, 1)
         cell.font = label_font
         cell.fill = label_fill
