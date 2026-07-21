@@ -17,15 +17,42 @@ doc for the original evidence trail, plus independent re-verification below):
      rows and same-day duplicate pings included).
   3. 'Consolidated Shipment No.' tab = same daily rows, per day: join Product
      Name from MTR -> drop Clinker rows -> dedupe by Shipment No. (keep first
-     row in file order) -> add STO/NON STO, Onward Status, shareable link,
+     row in file order) -> STO/NON STO, Onward Status, shareable link,
      Test -> leave Mail Status / vehicle test blank for new rows, preserve
      existing values for carried-forward rows.
   4. 'Master' tab = shipments whose 'vehicle test' starts with "offline"
      (case-insensitive), append-only, excluding shipments whose latest
      'Mail Status' is "Waived OFF".
-  5. 'MTR' tab = wholesale replaced with the latest MTR export each run.
+  5. 'MTR' tab = wholesale replaced with the latest MTR export each run,
+     column order UNCHANGED from the raw export (required -- see below).
   6. 'Table' tab = carried forward unchanged (scratch/lookup helper,
      unrelated to the pipeline).
+
+CELL-FOR-CELL FORMULA/FORMATTING FIDELITY (added after comparing our output
+against the real reference workbook cell-by-cell, not just its computed
+values):
+  - STO/NON STO, Onward Status, and shareable link (Consolidated Shipment
+    No. tab) and every Master column except 'Shipment No.'/'Freight loss'
+    are live Excel formulas in the real workbook (an IFS + several
+    XLOOKUPs), NOT static values -- see FORMULA_SPECS below. They're
+    written as real formula cells here too, computed fresh for every row
+    at write time rather than approximated in pandas, which also sidesteps
+    a subtle mismatch: the real "Onward Status" formula actually reads
+    MTR's "Stamp Status" column (not MTR's own "Onward Status" column,
+    despite the CSN column's label) -- something a pandas .map() against
+    the wrong-but-same-named column would never replicate.
+  - Because those formulas hardcode MTR column LETTERS (e.g. "MTR!CI:CI"),
+    the MTR tab's column order must exactly match the raw export's own
+    order -- _load_mtr_lookup returns the untouched raw frame for this
+    reason; do not reindex/reorder it before writing.
+  - Every data cell (not just headers) on Consolidated/Consolidated
+    Shipment No./Master uses "Aptos Narrow" 10pt + thin border on all 4
+    sides + centered alignment, matching the real file -- previously
+    skipped for Render-free-tier performance reasons that no longer apply
+    now that this report runs via SSH offload to the office server.
+  - Table tab is carried forward with its FORMULAS intact (not the cached
+    values Excel last saved), so it keeps working exactly like it does when
+    Khagash edits it by hand.
 
 INDEPENDENTLY RE-VERIFIED (not just taking the provided script's word for it)
 against the real files (Battery_Disconnection_Master_1_July_2026.xlsx as
@@ -97,13 +124,16 @@ CSN_TAB_COLS = [
 ]
 
 MASTER_TAB_COLS = [
-    "Shipment No.", "Invoice Number", "Plant Name", "Truck No", "Transporter Name",
+    # NOTE: 4 of these headers use a non-breaking space (\xa0), not a regular
+    # space -- confirmed by reading the real workbook's actual header cells.
+    # Getting this wrong (regular space) silently creates duplicate columns
+    # once real data lands in them, since pandas/Excel treat them as
+    # different column names.
+    "Shipment No.", "Invoice Number", "Plant Name", "Truck\xa0No", "Transporter\xa0Name",
     "Unloading point(ship-to-party)", "Billing date", "Tracking Link", "Sold To Code",
-    "Name(Sold-To Party)", "Distribution Channel", "Region(Ship To Party)",
+    "Name(Sold-To Party)", "Distribution\xa0Channel", "Region(Ship\xa0 To Party)",
     "District(Ship-To Party)", "QTY (MT)", "Freight loss", "Last Date", "Area",
 ]
-
-DIST_CHANNEL_MAP = {20: "DEALER TRADE", 10: "DIR PARTY(NON TRADE)", 30: "STOCK TRANSFER"}
 
 FREIGHT_LOSS = 5000
 
@@ -113,22 +143,31 @@ FREIGHT_LOSS = 5000
 # ---------------------------------------------------------------------------
 
 def _load_mtr_lookup(mtr_path: Path):
-    """Load MTR raw export and build the lookup fields this pipeline needs."""
+    """Load MTR raw export. Returns (slim lookup df, raw df for MTR tab
+    refresh).
+
+    The raw df's column ORDER must be preserved exactly as exported --
+    the real workbook's Master/Consolidated Shipment No. tabs use XLOOKUP
+    formulas that hardcode MTR column LETTERS (e.g. "MTR!CI:CI"), not
+    column names, assuming the MTR export's layout is stable day to day.
+    Our own generated formulas below rely on the same assumption, so the
+    MTR tab we write must keep the export's original column positions --
+    do NOT reindex/reorder this frame (an earlier version called
+    `.set_index("Shipment Number").reset_index()` before writing it out,
+    which moved that column to the front and shifted every other column
+    one position right, silently breaking every hardcoded-letter formula).
+    """
     try:
         if mtr_path.suffix.lower() == ".csv":
-            df = pd.read_csv(mtr_path, dtype={"Shipment Number": "Int64"})
+            raw = pd.read_csv(mtr_path, dtype={"Shipment Number": "Int64"})
         else:
-            df = pd.read_excel(mtr_path, dtype={"Shipment Number": "Int64"})
+            raw = pd.read_excel(mtr_path, dtype={"Shipment Number": "Int64"})
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read MTR Raw file '{mtr_path.name}': {exc}") from exc
 
-    df = df.drop_duplicates(subset=["Shipment Number"], keep="first")
-    df = df.set_index("Shipment Number")
-    keep_cols = [
-        "Product Name", "Onward Status", "Share Trip", "40 Km Geofence Start Time",
-        "SOLD TO", "SOLD TO NM", "REGION_CODE", "Ship to District", "Quantity",
-    ]
-    return df[keep_cols], df  # (slim lookup, full df for MTR tab refresh)
+    lookup = raw.drop_duplicates(subset=["Shipment Number"], keep="first").set_index("Shipment Number")
+    keep_cols = ["Product Name", "40 Km Geofence Start Time"]
+    return lookup[keep_cols], raw
 
 
 def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
@@ -161,10 +200,19 @@ def _load_prev_master_tabs(path: Path):
 
 
 def _load_table_tab_rows(path: Path):
-    """Read the 'Table' tab's raw values only (small scratch/lookup helper,
-    per the reference doc -- values matter, not exact formatting), using
-    read_only mode so we never load the workbook's other, much larger sheets
-    (Consolidated, MTR) into memory as full rich cell objects.
+    """Read the 'Table' tab's raw cell contents -- FORMULAS included, not
+    just their cached values -- using read_only mode so we never load the
+    workbook's other, much larger sheets (Consolidated, MTR) into memory as
+    full rich cell objects.
+
+    data_only=False (not True) is deliberate: the real Table tab's rows are
+    almost entirely XLOOKUP formulas referencing the Master tab (row 1's
+    Shipment No. is the only literal value); reading with data_only=True
+    would silently flatten them to whatever value happened to be cached the
+    last time the source file was saved in Excel, permanently destroying
+    the formulas on the very first run through this pipeline. Confirmed
+    read_only=True still returns formula text (as a plain string) rather
+    than a computed value when data_only=False.
 
     openpyxl.load_workbook(path) (full/writable mode) on a growing multi-tab
     workbook measured 1.6GB peak memory and 188s locally -- far past
@@ -172,7 +220,7 @@ def _load_table_tab_rows(path: Path):
     Read-only mode + only touching the one small tab we need avoids that.
     """
     try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read '{path.name}': {exc}") from exc
     if "Table" not in wb.sheetnames:
@@ -188,14 +236,37 @@ def _load_table_tab_rows(path: Path):
 # ---------------------------------------------------------------------------
 
 def build_new_consolidated_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp) -> pd.DataFrame:
-    """Tag today's raw rows with the report date, unfiltered (for 'Consolidated' tab)."""
+    """Tag today's raw rows with the report date, unfiltered (for 'Consolidated' tab).
+
+    Renames to the same "Transporter"/"Ship To Name" headers the historical
+    Consolidated tab (and the CSN tab, via build_new_csn_rows) already use --
+    a prior version skipped this rename here, so freshly appended rows
+    landed under "Transporter Name"/"Ship to Name" instead, splitting what
+    should be one column into two once concatenated with history (confirmed
+    by comparing our output against the real reference file: every new row
+    had the renamed columns null and the raw-named columns populated, the
+    reverse of every historical row).
+    """
     df = new_raw_df.copy()
+    df = df.rename(columns={"Transporter Name": "Transporter", "Ship to Name": "Ship To Name"})
     df.insert(0, "Date", report_date)
     return df
 
 
 def build_new_csn_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp, mtr_lookup: pd.DataFrame):
-    """Clinker-filter + per-day dedupe + derive columns (for 'Consolidated Shipment No.')."""
+    """Clinker-filter + per-day dedupe + derive columns (for 'Consolidated Shipment No.').
+
+    STO/NON STO, Onward Status, and shareable link are NOT computed here --
+    in the real workbook these are live Excel formulas (an IFS lookup and
+    two XLOOKUPs against the MTR tab), not static values, so they're left
+    as placeholder blanks in this DataFrame and written as actual formula
+    cells at output time instead (see FORMULA_SPECS / _write_sheet below).
+    Computing static equivalents here would only approximate what the
+    formulas do and can silently drift (confirmed: the real "Onward Status"
+    formula actually reads MTR's "Stamp Status" column despite its own
+    label, which a plain pandas .map() using the "Onward Status" MTR column
+    would never replicate exactly).
+    """
     df = new_raw_df.copy()
 
     # Join Product Name (only used here to filter Clinker; not stored in CSN tab).
@@ -220,9 +291,9 @@ def build_new_csn_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp, mtr_
         "Ship to Name": "Ship To Name",
     })
 
-    df["STO/NON STO"] = df["Distribution Channel"].map(DIST_CHANNEL_MAP)
-    df["Onward Status"] = df["Shipment No."].map(mtr_lookup["Onward Status"]).fillna(0)
-    df["shareable link"] = df["Shipment No."].map(mtr_lookup["Share Trip"]).fillna(0)
+    df["STO/NON STO"] = None  # written as a formula at output time
+    df["Onward Status"] = None  # written as a formula at output time
+    df["shareable link"] = None  # written as a formula at output time
 
     geofence = df["Shipment No."].map(mtr_lookup["40 Km Geofence Start Time"])
     found_in_mtr = df["Shipment No."].isin(mtr_lookup.index)
@@ -239,8 +310,16 @@ def build_new_csn_rows(new_raw_df: pd.DataFrame, report_date: pd.Timestamp, mtr_
     return df, stats
 
 
-def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFrame, mtr_lookup: pd.DataFrame) -> pd.DataFrame:
-    """Find shipments newly qualifying for Master (vehicle test starts with 'offline')."""
+def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFrame) -> pd.DataFrame:
+    """Find shipments newly qualifying for Master (vehicle test starts with 'offline').
+
+    Only 'Shipment No.' and 'Freight loss' are real values here -- every
+    other Master column is an XLOOKUP formula in the real workbook (against
+    Consolidated Shipment No. or MTR), so they're left as placeholder
+    blanks and written as formulas at output time instead (see
+    FORMULA_SPECS / _write_sheet below), the same reasoning as
+    build_new_csn_rows above.
+    """
     df = full_csn_df.copy()
     df["vehicle test"] = df["vehicle test"].fillna("")
     df["_is_offline"] = df["vehicle test"].str.strip().str.lower().str.startswith("offline")
@@ -253,34 +332,15 @@ def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFra
     latest_status = df_sorted.groupby("Shipment No.")["Mail Status"].last()
     waived = set(latest_status[latest_status.astype(str).str.strip().str.lower() == "waived off"].index)
 
-    new_ships = offline_ships - already_in_master - waived
+    new_ships = sorted(offline_ships - already_in_master - waived)
     if not new_ships:
         return pd.DataFrame(columns=MASTER_TAB_COLS)
 
-    # For each new shipment, take its most recent CSN record for the descriptive fields.
-    latest_rows = df_sorted[df_sorted["Shipment No."].isin(new_ships)].groupby(
-        "Shipment No.", as_index=False
-    ).last()
-
-    out = pd.DataFrame({
-        "Shipment No.": latest_rows["Shipment No."],
-        "Invoice Number": latest_rows["Invoice No."],
-        "Plant Name": latest_rows["Plant Name"],
-        "Truck No": latest_rows["Vehicle No."],
-        "Transporter Name": latest_rows["Transporter"],
-        "Unloading point(ship-to-party)": latest_rows["Unloading Point"],
-        "Billing date": latest_rows["Invoice Date and Time"],
-        "Tracking Link": latest_rows["Shipment No."].map(mtr_lookup["Share Trip"]),
-        "Sold To Code": latest_rows["Shipment No."].map(mtr_lookup["SOLD TO"]),
-        "Name(Sold-To Party)": latest_rows["Shipment No."].map(mtr_lookup["SOLD TO NM"]),
-        "Distribution Channel": latest_rows["Distribution Channel"],
-        "Region(Ship To Party)": latest_rows["Shipment No."].map(mtr_lookup["REGION_CODE"]),
-        "District(Ship-To Party)": latest_rows["Shipment No."].map(mtr_lookup["Ship to District"]),
-        "QTY (MT)": latest_rows["Shipment No."].map(mtr_lookup["Quantity"]),
-        "Freight loss": FREIGHT_LOSS,
-        "Last Date": latest_rows["Location Date and Time"],
-        "Area": latest_rows["Location Area"],
-    })
+    out = pd.DataFrame({"Shipment No.": new_ships})
+    for col in MASTER_TAB_COLS:
+        if col == "Shipment No.":
+            continue
+        out[col] = FREIGHT_LOSS if col == "Freight loss" else None
     return out[MASTER_TAB_COLS]
 
 
@@ -290,7 +350,9 @@ def build_master_additions(full_csn_df: pd.DataFrame, prev_master_df: pd.DataFra
 # this section only affects display).
 # ---------------------------------------------------------------------------
 
+from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.formula import ArrayFormula
 from reports._report6_col_widths import MTR_COL_WIDTHS
 
 APTOS_10 = "Aptos Narrow"
@@ -301,6 +363,63 @@ SHEET_STYLES = {
     "Consolidated Shipment No.": {"fill": "8FAADC", "font": APTOS_10, "size": 10},
     "Master": {"fill": "FFFF00", "font": APTOS_10, "size": 10},
     "MTR": {"fill": "A9D18E", "font": "Calibri", "size": 11},
+}
+
+# Every data cell (not just headers) on Consolidated/CSN/Master uses this
+# exact font + thin border on all 4 sides + centered alignment in the real
+# workbook (confirmed cell-by-cell on the reference file). MTR's data cells
+# use openpyxl's own defaults (Calibri 11, no border) so it needs no entry
+# here. Shared Font/Border/Alignment instances (not one per cell) keep the
+# O(n) styling loop below cheap even across tens of thousands of rows --
+# this report now runs on the office server via SSH offload (real CPU/RAM),
+# not Render's free tier, so this per-cell cost is no longer the risk it
+# used to be when this sheet only got header styling.
+DATA_FONT = Font(name=APTOS_10, size=10, bold=False)
+_THIN = Side(style="thin")
+DATA_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+DATA_ALIGNMENT = Alignment(horizontal="center", vertical="center")
+SHEETS_WITH_FULL_DATA_STYLE = {"Consolidated", "Consolidated Shipment No.", "Master"}
+
+# These columns hold live Excel formulas in the real workbook, not static
+# values -- see build_new_csn_rows / build_master_additions above for why
+# they're computed here instead of in pandas. Each function takes the
+# 1-based Excel row number and returns either a formula string or an
+# ArrayFormula (for the one column that's array-entered in the real file).
+# Column letters (S, J, MTR!CI, MTR!Y, etc.) are hardcoded to exactly match
+# the real workbook's own formulas, which assume the same fixed column
+# layout this report also uses (CSN_TAB_COLS / MASTER_TAB_COLS order, and
+# the MTR tab's untouched original export column order -- see
+# _load_mtr_lookup's docstring).
+FORMULA_SPECS = {
+    "Consolidated Shipment No.": {
+        "STO/NON STO": lambda r: ArrayFormula(
+            f"T{r}",
+            f'=_xlfn.IFS(S{r}=20,"DEALER TRADE",S{r}=10,"DIR PARTY(NON TRADE)",S{r}=30,"STOCK TRANSFER")',
+        ),
+        # NOTE: despite its "Onward Status" header, the real file's formula
+        # reads MTR's "Stamp Status" column (MTR!Y:Y), not MTR's own
+        # "Onward Status" column -- confirmed both columns exist and differ
+        # in the raw MTR export. Replicated exactly as-is, not "corrected".
+        "Onward Status": lambda r: f"=_xlfn.XLOOKUP(J{r},MTR!CI:CI,MTR!Y:Y,0)",
+        "shareable link": lambda r: f"=_xlfn.XLOOKUP(J{r},MTR!CI:CI,MTR!BE:BE,0)",
+    },
+    "Master": {
+        "Invoice Number": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!R:R)",
+        "Plant Name": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!N:N)",
+        "Truck\xa0No": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!D:D)",
+        "Transporter\xa0Name": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!E:E)",
+        "Unloading point(ship-to-party)": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!P:P)",
+        "Billing date": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!M:M)",
+        "Tracking Link": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!V:V)",
+        "Sold To Code": lambda r: f"=_xlfn.XLOOKUP(A{r},MTR!CI:CI,MTR!AI:AI)",
+        "Name(Sold-To Party)": lambda r: f"=_xlfn.XLOOKUP(A{r},MTR!CI:CI,MTR!AJ:AJ)",
+        "Distribution\xa0Channel": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!S:S)",
+        "Region(Ship\xa0 To Party)": lambda r: f"=_xlfn.XLOOKUP(A{r},MTR!CI:CI,MTR!CE:CE)",
+        "District(Ship-To Party)": lambda r: f"=_xlfn.XLOOKUP(A{r},MTR!CI:CI,MTR!AT:AT)",
+        "QTY (MT)": lambda r: f"=_xlfn.XLOOKUP(A{r},MTR!CI:CI,MTR!CV:CV)",
+        "Last Date": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!L:L)",
+        "Area": lambda r: f"=_xlfn.XLOOKUP(A{r},'Consolidated Shipment No.'!J:J,'Consolidated Shipment No.'!K:K)",
+    },
 }
 
 # Despite the name, this is really "column name -> number_format override" --
@@ -335,10 +454,10 @@ CSN_COL_WIDTHS = {
 }
 MASTER_COL_WIDTHS = {
     "Shipment No.": 11.89, "Invoice Number": 13.78, "Plant Name": 12.22,
-    "Transporter Name": 41.55, "Unloading point(ship-to-party)": 25.11,
+    "Transporter\xa0Name": 41.55, "Unloading point(ship-to-party)": 25.11,
     "Billing date": 10.33, "Tracking Link": 74.22, "Sold To Code": 11.22,
-    "Name(Sold-To Party)": 51.33, "Distribution Channel": 17.44,
-    "Region(Ship To Party)": 18.55, "District(Ship-To Party)": 18.44,
+    "Name(Sold-To Party)": 51.33, "Distribution\xa0Channel": 17.44,
+    "Region(Ship\xa0 To Party)": 18.55, "District(Ship-To Party)": 18.44,
     "QTY (MT)": 8.44, "Freight loss": 10.11, "Last Date": 12.11, "Area": 39.89,
 }
 DEFAULT_COL_WIDTH = 13.0
@@ -356,22 +475,27 @@ def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
     matches the fast pattern used in Reports 2 & 3 (write_only mode was
     tried and reverted, see git history: slower in practice here, not worth
     its memory saving on this specific workload). Header fill/font, column
-    widths, and date number-formats are matched to the real file below; no
-    freeze panes -- the real file doesn't use them either, despite the
-    original script adding freeze_panes="A2" on every tab.
+    widths, date number-formats, per-cell data styling, and formula columns
+    are all matched to the real file below; no freeze panes -- the real
+    file doesn't use them either, despite the original script adding
+    freeze_panes="A2" on every tab.
 
-    Deliberately NOT setting a per-row data font (the real file uses "Aptos
-    Narrow" 10pt on some sheets' data rows, openpyxl's default is Calibri
-    11): looping ws.cell() to style every one of ~1.45M data cells is
-    exactly the O(n) styling cost that already made this report's write
-    step marginal on Render (see the write_only/plain-Workbook history
-    above) -- not worth re-risking a report already on hold for being too
-    slow, for a data-row font that doesn't affect any actual figures.
+    Full per-cell data-row styling (font/border/alignment) on Consolidated/
+    CSN/Master, and writing actual formulas for FORMULA_SPECS columns, used
+    to be considered too expensive here (an O(n) styling loop across
+    ~1.45M cells was the exact cost that made this report's write step
+    marginal on Render's free tier). That's no longer the constraint this
+    report runs under -- it now executes on the office server via SSH
+    offload (real CPU/RAM), not Render, so the per-cell cost is acceptable
+    and full-fidelity output (matching the real workbook cell-for-cell,
+    formulas included) takes priority.
     """
     style = SHEET_STYLES.get(sheet_name, {"fill": None, "font": "Calibri", "size": 11})
     header_font = Font(name=style["font"], size=style["size"], bold=True)
     header_fill = PatternFill(fill_type="solid", fgColor=style["fill"]) if style["fill"] else None
     col_widths = COL_WIDTHS_BY_SHEET.get(sheet_name, {})
+    apply_full_data_style = sheet_name in SHEETS_WITH_FULL_DATA_STYLE
+    formula_specs = FORMULA_SPECS.get(sheet_name, {})
 
     ws = wb.create_sheet(sheet_name)
     columns = list(df.columns)
@@ -385,13 +509,22 @@ def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
         ws.column_dimensions[letter].width = col_widths.get(str(name).strip(), DEFAULT_COL_WIDTH)
 
     date_col_idxs = {i: DATE_COLUMN_FORMATS[name] for i, name in enumerate(columns) if name in DATE_COLUMN_FORMATS}
+    formula_col_idxs = {i: formula_specs[name] for i, name in enumerate(columns) if name in formula_specs}
 
     row_idx = 1
     for row in df.itertuples(index=False):
         row_idx += 1
         ws.append(row)
+        if apply_full_data_style:
+            for col_idx in range(1, len(columns) + 1):
+                cell = ws.cell(row_idx, col_idx)
+                cell.font = DATA_FONT
+                cell.border = DATA_BORDER
+                cell.alignment = DATA_ALIGNMENT
         for idx, fmt in date_col_idxs.items():
             ws.cell(row_idx, idx + 1).number_format = fmt
+        for idx, formula_fn in formula_col_idxs.items():
+            ws.cell(row_idx, idx + 1).value = formula_fn(row_idx)
     return ws
 
 
@@ -411,7 +544,6 @@ def _write_table_tab(wb, rows: list):
         cell.fill = label_fill
     ws.column_dimensions["A"].width = 27.33
     ws.column_dimensions["B"].width = 75.11
-    return ws
     return ws
 
 
@@ -436,7 +568,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
         new_csn_rows, stats = build_new_csn_rows(new_raw, report_date, mtr_lookup)
         full_csn = pd.concat([prev_csn, new_csn_rows], ignore_index=True)
 
-        new_master_rows = build_master_additions(full_csn, prev_master, mtr_lookup)
+        new_master_rows = build_master_additions(full_csn, prev_master)
         full_master = pd.concat([prev_master, new_master_rows], ignore_index=True)
     except KeyError as exc:
         raise ReportProcessingError(
@@ -468,7 +600,10 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     _write_sheet(wb, "Consolidated Shipment No.", full_csn)
     _write_table_tab(wb, table_rows)
     _write_sheet(wb, "Master", full_master)
-    _write_sheet(wb, "MTR", mtr_full.reset_index())
+    # No reset_index()/reorder here -- mtr_full already preserves the raw
+    # export's original column order, which the XLOOKUP formulas above
+    # (hardcoded to column letters like MTR!CI:CI) depend on staying put.
+    _write_sheet(wb, "MTR", mtr_full)
 
     output_path = output_dir / f"Battery_Disconnection_Master_{report_date_str}.xlsx"
     wb.save(output_path)
