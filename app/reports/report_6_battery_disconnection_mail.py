@@ -137,25 +137,47 @@ MASTER_TAB_COLS = [
 
 FREIGHT_LOSS = 5000
 
+# The real MTR tab is NOT simply the raw export's columns as-is -- it's the
+# raw export with these 12 columns dropped (same list Reports 1/2/3 already
+# use for the same reason). Confirmed empirically: raw export minus these
+# 12 columns, in the raw export's own remaining column order, matches the
+# real reference file's MTR tab both in column SET and ORDER exactly (121
+# columns either way). Without this, "Shipment Number" and every other
+# hardcoded-letter-referenced column (e.g. MTR!CI:CI, MTR!Y:Y) sits 1-12
+# positions off from where the real workbook's formulas expect them,
+# breaking every XLOOKUP that joins against MTR -- this was the actual
+# cause of #N/A / 0 results seen in testing, not stale/dropped-off MTR data
+# as initially assumed.
+MTR_DROP_COLUMNS = [
+    "Probable Unloading Count", "Probable Unloading Detention",
+    "1 Km Geofence Start Time", "1 Km Geofence End Time", "1 Km Geofence Detention",
+    "20 Km Geofence Start Time", "20 Km Geofence End Time", "20 Km Geofence Detention",
+    "40 Km Geofence Start Time", "40 Km Geofence End Time", "40 Km Geofence Detention",
+    "Lap Sharable Link",
+]
+
 
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
 
 def _load_mtr_lookup(mtr_path: Path):
-    """Load MTR raw export. Returns (slim lookup df, raw df for MTR tab
-    refresh).
+    """Load MTR raw export. Returns (slim lookup df, MTR-tab df).
 
-    The raw df's column ORDER must be preserved exactly as exported --
-    the real workbook's Master/Consolidated Shipment No. tabs use XLOOKUP
-    formulas that hardcode MTR column LETTERS (e.g. "MTR!CI:CI"), not
-    column names, assuming the MTR export's layout is stable day to day.
-    Our own generated formulas below rely on the same assumption, so the
-    MTR tab we write must keep the export's original column positions --
-    do NOT reindex/reorder this frame (an earlier version called
+    The returned MTR-tab df's column ORDER must exactly match the real
+    workbook's own MTR tab -- the real Master/Consolidated Shipment No.
+    tabs use XLOOKUP formulas that hardcode MTR column LETTERS (e.g.
+    "MTR!CI:CI"), not column names. That real layout is NOT simply "the
+    raw export's columns as exported" (confirmed: a fresh raw export had
+    "Shipment Number" at column 89, but the real workbook's MTR tab has it
+    at column 87 -- the export's own column order isn't stable day to
+    day). It's "the raw export with MTR_DROP_COLUMNS removed, keeping the
+    remaining columns' relative order" -- confirmed this exactly reproduces
+    the real file's MTR tab, both column set and order. Do NOT additionally
+    reindex/reorder beyond that drop (an earlier version called
     `.set_index("Shipment Number").reset_index()` before writing it out,
-    which moved that column to the front and shifted every other column
-    one position right, silently breaking every hardcoded-letter formula).
+    which moved that column to the front and shifted everything else one
+    position right -- also wrong, for the same reason).
     """
     try:
         if mtr_path.suffix.lower() == ".csv":
@@ -167,7 +189,9 @@ def _load_mtr_lookup(mtr_path: Path):
 
     lookup = raw.drop_duplicates(subset=["Shipment Number"], keep="first").set_index("Shipment Number")
     keep_cols = ["Product Name", "40 Km Geofence Start Time"]
-    return lookup[keep_cols], raw
+
+    mtr_tab_df = raw.drop(columns=[c for c in MTR_DROP_COLUMNS if c in raw.columns])
+    return lookup[keep_cols], mtr_tab_df
 
 
 def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
