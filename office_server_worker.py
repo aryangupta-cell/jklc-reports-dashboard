@@ -16,18 +16,17 @@ Protocol (paired with app/core/ssh_worker.py on the hosting side):
   stdout -- a zip containing exactly one file: the generated report.
   stderr -- logs / error details on failure (non-zero exit code).
 
-Deployment on the office server:
+Deployment on the office server (same pattern as Anchal's app):
   1. Check out this repo (or copy app/ + this file) to some directory,
      e.g. ~/mtr-report-worker/.
   2. Inside that directory: python3 -m venv venv && venv/bin/pip install
      -r requirements.txt (same requirements.txt as the hosted app).
   3. Add the hosting side's SSH public key to ~/.ssh/authorized_keys here.
-  4. Set OFFICE_SERVER_WORKER_PATH on the hosting side (Render) to the full
-     path of this file, e.g. /home/<user>/mtr-report-worker/office_server_worker.py
-     -- and point it at a python3 that has the venv's packages, e.g. by
-     using the venv's own interpreter instead of a bare `python3` (see
-     ssh_worker.py's command construction if that needs adjusting for your
-     server's setup).
+  4. On Render, set REMOTE_DIR to this directory's path (e.g.
+     /home/<user>/mtr-report-worker) and REMOTE_PYTHON to the venv's own
+     interpreter (e.g. /home/<user>/mtr-report-worker/venv/bin/python3) so
+     it has the installed packages -- plus SSH_HOST / SSH_USER /
+     SSH_KEY_PATH / SSH_HOST_KEY (see app/core/ssh_worker.py).
 
 Runs entirely under a temp directory that lives on tmpfs (/dev/shm) when
 available, so nothing here touches real disk and everything is cleaned up
