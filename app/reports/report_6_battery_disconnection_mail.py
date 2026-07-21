@@ -72,7 +72,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from reports.errors import ReportProcessingError
+from reports.errors import ReportProcessingError, describe_column_mismatch
 from reports.registry import InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -137,11 +137,10 @@ def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
         df = pd.read_excel(path, sheet_name="Sheet1")
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read '{path.name}': {exc}") from exc
-    missing = set(RAW_CONSOLIDATED_COLS) - set(df.columns)
-    if missing:
+    mismatch = describe_column_mismatch(df.columns, RAW_CONSOLIDATED_COLS, path.name)
+    if mismatch:
         raise ReportProcessingError(
-            f"'{path.name}' is missing expected columns: {sorted(missing)}. "
-            "Check you uploaded the Daily Battery Disconnected Consolidated Report."
+            f"{mismatch} Check you uploaded the Daily Battery Disconnected Consolidated Report."
         )
     return df[RAW_CONSOLIDATED_COLS].copy()
 

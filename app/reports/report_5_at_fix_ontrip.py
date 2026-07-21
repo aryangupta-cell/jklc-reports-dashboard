@@ -70,7 +70,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from reports.errors import ReportProcessingError
+from reports.errors import ReportProcessingError, describe_column_mismatch
 from reports.registry import InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -126,11 +126,10 @@ def _load_gps_remarks(path: Path) -> pd.DataFrame:
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read GPS Remarks file '{path.name}': {exc}") from exc
 
-    missing = set(GPS_REMARKS_COLS) - set(df.columns)
-    if missing:
+    mismatch = describe_column_mismatch(df.columns, GPS_REMARKS_COLS, path.name)
+    if mismatch:
         raise ReportProcessingError(
-            f"'{path.name}' is missing expected columns: {sorted(missing)}. "
-            "Check you uploaded the GPS Remarks sheet export (tab: GPS Remarks)."
+            f"{mismatch} Check you uploaded the GPS Remarks sheet export (tab: GPS Remarks)."
         )
     return df[GPS_REMARKS_COLS].copy()
 

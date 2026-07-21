@@ -58,7 +58,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 import pandas as pd
 
-from reports.errors import ReportProcessingError
+from reports.errors import ReportProcessingError, describe_column_mismatch
 from reports.registry import InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -83,11 +83,10 @@ def _load_raw_xswift_export(path: Path) -> pd.DataFrame:
         df = pd.read_excel(path, sheet_name="Sheet1")
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read '{path.name}': {exc}") from exc
-    missing = set(RAW_COLS) - set(df.columns)
-    if missing:
+    mismatch = describe_column_mismatch(df.columns, RAW_COLS, path.name)
+    if mismatch:
         raise ReportProcessingError(
-            f"'{path.name}' is missing expected columns: {sorted(missing)}. "
-            "Check you uploaded the raw Xswift battery-disconnect export."
+            f"{mismatch} Check you uploaded the raw Xswift battery-disconnect export."
         )
     return df[RAW_COLS].copy()
 
