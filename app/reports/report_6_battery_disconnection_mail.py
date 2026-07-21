@@ -565,25 +565,51 @@ def _write_sheet(wb, sheet_name: str, df: pd.DataFrame):
 def _write_table_tab(wb, rows: list):
     """Table is a tiny (~17-row) scratch/lookup helper, so per-cell styling
     here is cheap and safe (unlike the large data sheets above). Matches
-    the real file: column A (labels) bold + yellow fill on every row,
-    column B (values/formulas) plain but keeping whatever number_format the
-    source cell had (see _load_table_tab_rows -- 2 rows are date-valued
-    XLOOKUPs that need their "m/d/yy h:mm" format preserved, or Excel shows
-    the recalculated result as a raw date serial number instead).
+    the real file cell-by-cell (confirmed, not assumed):
+      - Every cell (both columns) gets thin border on all 4 sides + centered
+        alignment.
+      - Column A: Calibri 11 bold, solid yellow fill, on every row.
+      - Column B: Calibri 11 plain on rows 2-14, but Aptos Narrow 10 (not
+        bold) on row 1 specifically, and Calibri 11 BOLD on rows 15-17
+        (Freight loss/Last Date/Area) -- an odd manual quirk in the real
+        file, replicated exactly rather than "corrected" since matching
+        the real file exactly is the point here.
+      - number_format is preserved per-cell from the source file (see
+        _load_table_tab_rows -- 2 rows are date-valued XLOOKUPs that need
+        their "m/d/yy h:mm" format preserved, or Excel shows the
+        recalculated result as a raw date serial number instead).
 
     `rows` is a list of rows, each a list of (value, number_format) tuples,
     as produced by _load_table_tab_rows.
     """
     ws = wb.create_sheet("Table")
-    label_font = Font(bold=True)
+    label_font = Font(name="Calibri", size=11, bold=True)
     label_fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+    value_font_row1 = Font(name=APTOS_10, size=10, bold=False)
+    value_font_plain = Font(name="Calibri", size=11, bold=False)
+    value_font_bold = Font(name="Calibri", size=11, bold=True)
+
     for row_idx, row in enumerate(rows, start=1):
         ws.append([value for value, _ in row])
         for col_idx, (_, number_format) in enumerate(row, start=1):
-            ws.cell(row_idx, col_idx).number_format = number_format
-        cell = ws.cell(row_idx, 1)
-        cell.font = label_font
-        cell.fill = label_fill
+            cell = ws.cell(row_idx, col_idx)
+            # A cell openpyxl's read-only mode never actually touched (e.g.
+            # a genuinely blank row) reports number_format as None rather
+            # than "General" -- guard against that rather than writing an
+            # invalid None into the output, which openpyxl refuses to save.
+            cell.number_format = number_format or "General"
+            cell.border = DATA_BORDER
+            cell.alignment = DATA_ALIGNMENT
+        label_cell = ws.cell(row_idx, 1)
+        label_cell.font = label_font
+        label_cell.fill = label_fill
+        value_cell = ws.cell(row_idx, 2)
+        if row_idx == 1:
+            value_cell.font = value_font_row1
+        elif row_idx >= 15:
+            value_cell.font = value_font_bold
+        else:
+            value_cell.font = value_font_plain
     ws.column_dimensions["A"].width = 27.33
     ws.column_dimensions["B"].width = 75.11
     return ws
