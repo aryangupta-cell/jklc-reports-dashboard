@@ -29,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # deployed URL is fully public. To re-enable: add
 # `dependencies=[Depends(require_auth)]` back here, using core/auth.py, which
 # is still in place (HTTP Basic, reads DASHBOARD_USERNAME/DASHBOARD_PASSWORD).
-app = FastAPI(title="JKLC Reports Dashboard")
+app = FastAPI(title="ATC Report Dashboard")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
