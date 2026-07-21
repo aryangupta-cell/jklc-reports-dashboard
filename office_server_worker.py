@@ -28,6 +28,18 @@ Deployment on the office server (same pattern as Anchal's app):
      it has the installed packages -- plus SSH_HOST / SSH_USER /
      SSH_KEY_PATH / SSH_HOST_KEY (see app/core/ssh_worker.py).
 
+Every run auto-updates its own checkout first (`git pull --ff-only`, see
+_git_pull below) -- unlike the hosted app on Render, which redeploys on
+every push automatically, this folder is just a plain clone that would
+otherwise silently keep running whatever code was here the last time
+someone manually pulled (this bit us once already: a formula/formatting
+rewrite was pushed and tested live for a while before anyone noticed this
+folder was still several commits behind). If the pull fails (network
+blip, merge conflict, etc.) the run aborts with a clear error instead of
+silently using stale or partially-updated code -- if that's happening
+often enough to be annoying, running `git pull` manually here and
+re-running the report is the fallback.
+
 Runs entirely under a temp directory that lives on tmpfs (/dev/shm) when
 available, so nothing here touches real disk and everything is cleaned up
 before the process exits -- some company servers restrict storage use.
@@ -36,15 +48,18 @@ before the process exits -- some company servers restrict storage use.
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
+REPO_DIR = Path(__file__).resolve().parent
+
 # Mirrors the hosted app's own layout (`uvicorn main:app --app-dir app`) --
 # the `app` directory is the import root, so `reports.<module>` resolves
 # the same way here as it does on Render.
-sys.path.insert(0, str(Path(__file__).resolve().parent / "app"))
+sys.path.insert(0, str(REPO_DIR / "app"))
 
 # Map of report id -> its module path under `reports/`, and the name of the
 # entry-point function to call. Add an entry here for any other report you
@@ -52,6 +67,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "app"))
 REPORT_MODULES = {
     "6": ("reports.report_6_battery_disconnection_mail", "process"),
 }
+
+
+def _git_pull():
+    result = subprocess.run(
+        ["git", "-C", str(REPO_DIR), "pull", "--ff-only"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+    )
+    output = (result.stdout + result.stderr).decode(errors="replace")
+    print(output, file=sys.stderr)
+    if result.returncode != 0:
+        print("git pull failed -- aborting rather than run possibly-stale/broken code.", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():
@@ -65,6 +92,8 @@ def main():
         print(f"Unknown or unsupported report id '{report_id}'", file=sys.stderr)
         sys.exit(2)
     module_path, fn_name = entry
+
+    _git_pull()
 
     import importlib
     module = importlib.import_module(module_path)
