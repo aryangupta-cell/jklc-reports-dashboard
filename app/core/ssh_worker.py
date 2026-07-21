@@ -81,9 +81,15 @@ def run_remote(report_id: str, input_files: dict, dates: dict, output_dir: Path)
 
     known_hosts_path = None
     if host_key:
+        host_key = host_key.strip()
+        # SSH_HOST_KEY may be just the base64 key blob (e.g. copied straight
+        # from `ssh-keyscan` output's 3rd field) or a full "host keytype
+        # blob" line -- a known_hosts entry needs the hostname + key type
+        # prefix, so add it if it's missing.
+        known_hosts_line = host_key if " " in host_key else f"{host} ssh-ed25519 {host_key}"
         fd, known_hosts_path = tempfile.mkstemp(prefix="ssh_known_hosts_")
         with os.fdopen(fd, "w") as f:
-            f.write(host_key.strip() + "\n")
+            f.write(known_hosts_line + "\n")
         cmd += ["-o", f"UserKnownHostsFile={known_hosts_path}", "-o", "StrictHostKeyChecking=yes"]
     else:
         cmd += ["-o", "StrictHostKeyChecking=accept-new"]
