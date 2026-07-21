@@ -476,6 +476,22 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     return output_path
 
 
+def process_dispatch(input_files: dict, dates: dict, output_dir: Path) -> Path:
+    """Entry point wired into the registry below. Offloads to the office
+    server over SSH when OFFICE_SERVER_HOST is configured (see
+    core/ssh_worker.py + office_server_worker.py at the repo root) -- this
+    report's write step is the one that has repeatedly OOM'd/timed out on
+    Render's free tier (see notes above). With no office server configured
+    (the default), falls straight through to the same `process()` above
+    unchanged, so local dev/testing behaves exactly as it always has.
+    """
+    from core.ssh_worker import is_configured, run_remote
+
+    if is_configured():
+        return run_remote("6", input_files, dates, output_dir)
+    return process(input_files, dates, output_dir)
+
+
 # ---------------------------------------------------------------------------
 # RE-ENABLED for another live test (per explicit instruction): the previous
 # 3 production attempts 502'd (467MB/76s and 96MB/174s locally, both failed
@@ -518,7 +534,7 @@ register(
         # advertised as ready), but if someone uploads and clicks Generate
         # anyway, it should still produce a correct, fully-working output --
         # which this achieves, since the real process_fn is still wired in.
-        process_fn=process,
+        process_fn=process_dispatch,
         implemented=False,
         date_mode="single",
         notes=(
