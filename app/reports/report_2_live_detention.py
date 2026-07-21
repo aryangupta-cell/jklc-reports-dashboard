@@ -37,7 +37,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-from reports.errors import ReportProcessingError
+from reports.errors import ReportProcessingError, describe_column_mismatch
 from reports.registry import InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -78,6 +78,11 @@ ORG_LOCATIONS_ALL = ["JKLC Cuttack", "JKLC Durg", "JKLC Jharli", "JKLC Surat"]
 # "Detention" belongs in the final Summary. Previous guess of
 # ["Detention", "OUT OF GEOFENCE"] was wrong -- dropped.
 SUMMARY_INCLUDE_REMARKS = ["Detention"]
+
+# Exact raw column schema of the Detention Bot's output CSV (per the
+# original process() error message, which already named these 4 columns
+# explicitly): trip_id, remark, status, error.
+BOT_OUTPUT_COLS = ["trip_id", "remark", "status", "error"]
 
 SUMMARY_COLUMNS = [
     "Plant Name", "Invoice Number", "Quantity", "Distribution Channel",
@@ -383,6 +388,11 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     mtr_raw = _read_any(mtr_path)
     dispatch_raw = _read_any(dispatch_path)
     bot_output = _read_any(bot_path)
+    mismatch = describe_column_mismatch(bot_output.columns, BOT_OUTPUT_COLS, bot_path.name)
+    if mismatch:
+        raise ReportProcessingError(
+            f"{mismatch} Check you uploaded the Detention Bot's output CSV."
+        )
 
     try:
         mtr_clean = clean_mtr(mtr_raw, start_date, end_date)

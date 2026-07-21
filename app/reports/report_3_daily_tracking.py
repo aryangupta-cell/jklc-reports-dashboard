@@ -103,7 +103,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from reports._report3_col_widths_mtr import MTR_FAMILY_COL_WIDTHS, ALL_INSTALLATION_COL_WIDTHS
-from reports.errors import ReportProcessingError
+from reports.errors import ReportProcessingError, describe_column_mismatch
 from reports.registry import ExtraNumberField, InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -215,11 +215,22 @@ def _load_master_entry_data(path: Path) -> pd.DataFrame:
         raise ReportProcessingError(f"Couldn't read Master Entry Data '{path.name}': {exc}") from exc
 
 
+# Exact raw column schema of the API Vehicles export (per the confirmed
+# finding in clean_api_vehicles()'s docstring below: the raw file has these
+# 6 columns -- fname, transporter_name, regno, apiprovider, addtime,
+# modified_time).
+API_VEHICLES_RAW_COLS = ["fname", "transporter_name", "regno", "apiprovider", "addtime", "modified_time"]
+
+
 def _load_api_vehicles(path: Path) -> pd.DataFrame:
     try:
-        return pd.read_csv(path, dtype=str)
+        df = pd.read_csv(path, dtype=str)
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read API Vehicles file '{path.name}': {exc}") from exc
+    mismatch = describe_column_mismatch(df.columns, API_VEHICLES_RAW_COLS, path.name)
+    if mismatch:
+        raise ReportProcessingError(f"{mismatch} Check you uploaded the raw API Vehicles export.")
+    return df
 
 
 def clean_api_vehicles(raw_df: pd.DataFrame) -> pd.DataFrame:
