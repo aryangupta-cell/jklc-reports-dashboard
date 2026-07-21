@@ -727,25 +727,25 @@ register(
         ],
         output_pattern="Battery_Disconnection_Master_<date>.xlsx (5 tabs: Consolidated, Consolidated "
                       "Shipment No., Table, Master, MTR)",
-        # implemented=False is COSMETIC ONLY here -- process_fn is still the
-        # real, working `process` function below, not the not_implemented
-        # stub. main.py's /generate route never checks `implemented`; it
-        # only drives the "not yet implemented" badge/text on the report
-        # page. Per explicit instruction: show the stub label (since this
-        # report is still unproven on Render's free tier and shouldn't be
-        # advertised as ready), but if someone uploads and clicks Generate
-        # anyway, it should still produce a correct, fully-working output --
-        # which this achieves, since the real process_fn is still wired in.
+        # implemented=True: Render's free-tier limits are no longer the
+        # blocker -- this report now runs on the office server via SSH
+        # offload (see core/ssh_worker.py + office_server_worker.py), which
+        # has real CPU/RAM. Independently verified live: SSH offload works
+        # end-to-end, formulas/formatting match the real reference workbook
+        # cell-for-cell (MTR column alignment, XLOOKUP/IFS formulas, Table
+        # tab formatting), and 3 real bugs found during that verification
+        # (Consolidated tab column-rename gap, Master tab nbsp mismatch,
+        # MTR tab column-drop/alignment) have all been fixed and confirmed.
         process_fn=process_dispatch,
-        implemented=False,
+        implemented=True,
         date_mode="single",
         notes=(
             "Stateful report -- needs the PREVIOUS day's Master workbook as an input each run "
             "(carries forward history + any manual Mail Status / vehicle test tags). Master tab = "
             "shipments whose 'vehicle test' starts with 'offline', append-only, excluding 'Waived "
-            "OFF'. Formatting matches the real master file exactly. Previously 502'd on Render's "
-            "free tier 3 times before write-speed optimizations (188s -> ~42s locally) -- being "
-            "retested live; if it 502s again this needs a hosting upgrade, not more code tuning."
+            "OFF'. Runs on the office server via SSH offload (not Render) -- requires SSH_HOST etc. "
+            "to be configured in the hosting environment; falls back to local processing otherwise. "
+            "Formulas and formatting match the real master file exactly, verified against real data."
         ),
     )
 )
