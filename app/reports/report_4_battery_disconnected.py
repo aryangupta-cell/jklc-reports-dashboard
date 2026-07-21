@@ -86,7 +86,7 @@ def _load_raw_xswift_export(path: Path) -> pd.DataFrame:
     mismatch = describe_column_mismatch(df.columns, RAW_COLS, path.name)
     if mismatch:
         raise ReportProcessingError(
-            f"{mismatch} Check you uploaded the raw Xswift battery-disconnect export."
+            f"{mismatch} (sheet: Sheet1) Check you uploaded the raw Xswift battery-disconnect export."
         )
     return df[RAW_COLS].copy()
 

@@ -203,7 +203,7 @@ def _load_new_consolidated_report(path: Path) -> pd.DataFrame:
     mismatch = describe_column_mismatch(df.columns, RAW_CONSOLIDATED_COLS, path.name)
     if mismatch:
         raise ReportProcessingError(
-            f"{mismatch} Check you uploaded the Daily Battery Disconnected Consolidated Report."
+            f"{mismatch} (sheet: Sheet1) Check you uploaded the Daily Battery Disconnected Consolidated Report."
         )
     return df[RAW_CONSOLIDATED_COLS].copy()
 
