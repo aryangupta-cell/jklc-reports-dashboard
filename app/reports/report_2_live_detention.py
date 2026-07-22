@@ -13,13 +13,29 @@ is kept as given except for fixes confirmed against real data:
 Validated against real 14 July data: 70/71 rows exact (1-row Durg gap
 traced to a secondary inclusion rule not yet identified; not blocking).
 
-Output is Summary-only (15 columns, formatted to match the real master
-file: Calibri 11pt, centered, headers at row 3 starting col C). MTR and
-20 KM tabs were tried (to match the real master file's 3-tab structure)
-but removed again -- writing that much data (25k+ MTR rows x 121 cols,
-x4 plant files) pushed peak memory to ~300MB+ on Render's free tier
-(512MB limit) and caused an OOM-driven 502. Per explicit instruction,
-staying Summary-only until the hosting plan is upgraded.
+Each of the 4 plant-wise files now has 3 tabs: MTR, 20 KM, Summary --
+matching the real master file's structure (JKLC Live Detention Master
+<date>.xlsx: MTR/20 KM/Summary, all 4 plants combined), but split per
+plant per the SOP's own step 13 ("split the Summary report into 4
+plant-wise reports"). MTR and 20 KM tabs are each filtered to that plant's
+own Org Location before writing, NOT the full multi-plant dataset --
+this was tried once before as an unfiltered full copy per plant file (4x
+duplicating the entire ~25k-row MTR export) and caused an OOM 502 on
+Render's free tier; filtering per plant first means the total data
+written across all 4 files is roughly the SAME as writing MTR once, not
+4x -- a real fix, not just "more RAM available now" (which is also true,
+since this runs via SSH office-server offload, not Render, as of the
+change that added this).
+
+The real master file's own "20 KM" tab additionally carries a handful of
+columns (Remark, EPOD_Timestamp, MIGO_Timestamp (STO), NOW, Detention
+(Hours)) that only exist after later pipeline steps have already run
+against it -- this implementation deliberately does NOT replicate those
+into the 20 KM tab here, and instead writes it as literally defined by
+the SOP's own Step 5 (the `build_20km_candidates()` output, before the
+Dispatch/detention/remark joins) to avoid guessing at an undocumented
+enrichment step under time pressure. Flagged to the user rather than
+silently approximated.
 
 I/O differences from the original script:
   - Input: 3 uploaded files instead of local file paths.
@@ -36,7 +52,9 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
+from reports._report2_col_widths import MTR_TAB_COL_WIDTHS, KM20_TAB_COL_WIDTHS
 from reports.errors import ReportProcessingError, describe_missing_columns
 from reports.registry import InputSlot, ReportMeta, register
 
@@ -341,31 +359,78 @@ def _write_summary_sheet(wb, df: pd.DataFrame):
     return ws
 
 
+# MTR/20 KM header styles -- computed from the real master file's theme
+# colors (theme+tint -> RGB, same technique used elsewhere in this project):
+# MTR header = theme 9 (accent6 "70AD47") @ tint 0.4 -> A9D18E, bold.
+# 20 KM header = theme 5 (accent2 "ED7D31") @ tint 0.6 -> F8CBAD, same as
+# this report's own Summary header fill, but NOT bold.
+MTR_HEADER_FONT = Font(name="Calibri", size=11, bold=True)
+MTR_HEADER_FILL = PatternFill(fill_type="solid", fgColor="A9D18E")
+KM20_HEADER_FONT = Font(name="Calibri", size=11, bold=False)
+KM20_HEADER_FILL = PatternFill(fill_type="solid", fgColor="F8CBAD")
+KM20_DATA_BORDER = THIN_BORDER  # 20 KM data rows have a thin border in the real file; MTR's don't.
+
+
+def _write_mtr_or_km20_sheet(wb, sheet_name: str, df: pd.DataFrame, col_widths: dict,
+                              header_font: Font, header_fill: PatternFill, data_border=None):
+    """Shared writer for the MTR and 20 KM tabs -- same bulk-append pattern
+    used elsewhere in this project (df.itertuples() + ws.append(), a
+    tracked row_idx counter, no per-cell ws.max_row/ws[...] lookups inside
+    the loop -- that O(n^2) pattern is what caused a real perf bug in an
+    earlier report)."""
+    ws = wb.create_sheet(sheet_name)
+    columns = list(df.columns)
+    ws.append(columns)
+    for col_idx, name in enumerate(columns, start=1):
+        cell = ws.cell(1, col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = col_widths.get(str(name).strip(), 8.43)
+
+    row_idx = 1
+    for row in df.itertuples(index=False):
+        row_idx += 1
+        ws.append(row)
+        if data_border:
+            for col_idx in range(1, len(columns) + 1):
+                ws.cell(row_idx, col_idx).border = data_border
+    return ws
+
+
 # ---------------------------------------------------------------------------
 # Split into 4 plant-wise files, zip them for a single download
 #
-# NOTE: MTR and 20 KM tabs were tried (per an earlier request to match the
-# real master file's 3-tab structure) but removed again -- writing that much
-# data (25k+ MTR rows x 121 cols, x4 plant files) pushed peak memory to
-# ~300MB+ on top of the interpreter/FastAPI baseline, which exceeds Render's
-# free-tier 512MB limit and caused an OOM-driven 502. Per explicit
-# instruction, staying Summary-only until the hosting plan can be upgraded.
+# Each file now has 3 tabs (MTR, 20 KM, Summary), matching the real master
+# file's structure per plant -- see this module's docstring for why MTR/20
+# KM are filtered to each plant's own Org Location before writing (fixes
+# the memory blowup that made an earlier all-tabs attempt OOM on Render,
+# independent of also now running via SSH office-server offload).
 # ---------------------------------------------------------------------------
 
-def _write_plant_outputs_zip(summary: pd.DataFrame, date_label: str, output_dir: Path) -> Path:
+def _write_plant_outputs_zip(mtr_clean: pd.DataFrame, candidates: pd.DataFrame,
+                              summary: pd.DataFrame, date_label: str, output_dir: Path) -> Path:
     xlsx_paths = []
 
     for plant in ORG_LOCATIONS_ALL:
         plant_short = plant.replace("JKLC ", "")
         xlsx_path = output_dir / f"JKLC_Live_Detention_{plant_short}_{date_label}.xlsx"
+        plant_mtr = mtr_clean[mtr_clean["Org Location"] == plant]
+        plant_candidates = candidates[candidates["Org Location"] == plant]
         plant_summary = summary[summary["Plant Name"] == plant]
 
         wb = Workbook()
         wb.remove(wb.active)  # drop the default blank sheet
+        _write_mtr_or_km20_sheet(wb, "MTR", plant_mtr, MTR_TAB_COL_WIDTHS, MTR_HEADER_FONT, MTR_HEADER_FILL)
+        _write_mtr_or_km20_sheet(wb, "20 KM", plant_candidates, KM20_TAB_COL_WIDTHS,
+                                  KM20_HEADER_FONT, KM20_HEADER_FILL, data_border=KM20_DATA_BORDER)
         _write_summary_sheet(wb, plant_summary)
         wb.save(xlsx_path)
 
-        log.info("%s: %d rows -> %s", plant, len(plant_summary), xlsx_path.name)
+        log.info(
+            "%s: MTR %d rows | 20 KM %d rows | Summary %d rows -> %s",
+            plant, len(plant_mtr), len(plant_candidates), len(plant_summary), xlsx_path.name,
+        )
         xlsx_paths.append(xlsx_path)
 
     zip_path = output_dir / f"JKLC_Live_Detention_{date_label}.zip"
@@ -426,7 +491,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     log.info("Final Summary rows: %d (%s)", len(summary), dict(summary["Plant Name"].value_counts()))
 
     date_label = f"{start_date}_to_{end_date}"
-    return _write_plant_outputs_zip(summary, date_label, output_dir)
+    return _write_plant_outputs_zip(mtr_clean, candidates, summary, date_label, output_dir)
 
 
 def process_dispatch(input_files: dict, dates: dict, output_dir: Path) -> Path:
@@ -469,15 +534,16 @@ register(
                 hint="bot output 13 detention_results.csv",
             ),
         ],
-        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files, Summary tab only)",
+        output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files, each with "
+                      "MTR, 20 KM, Summary tabs)",
         process_fn=process_dispatch,
         implemented=True,
         date_mode="range",
         notes=(
-            "Summary tab only (MTR/20 KM tabs tried but dropped -- OOM on Render free tier, "
-            "see module docstring). Detention-hour rule is floor-only (no upper cap). "
-            "Formatting matches real master file. Validated 70/71 rows on real 14 July data; "
-            "1-row gap not root-caused."
+            "Each plant file has 3 tabs (MTR, 20 KM, Summary), matching the real master file's "
+            "structure per plant -- MTR/20 KM filtered to that plant only (see module docstring "
+            "for why). Detention-hour rule is floor-only (no upper cap). Formatting matches real "
+            "master file. Validated 70/71 rows on real 14 July data; 1-row gap not root-caused."
         ),
     )
 )
