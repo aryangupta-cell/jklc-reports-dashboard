@@ -763,6 +763,30 @@ def _write_data_sheet(wb, sheet_name: str, df: pd.DataFrame, *, col_widths: dict
     return ws
 
 
+def add_at_wheelsye_columns(mtr: pd.DataFrame, device_status: pd.DataFrame,
+                             master_entry: pd.DataFrame) -> pd.DataFrame:
+    """Adds 2 boolean columns to the MTR tab ONLY (not Yesterday Completed
+    Trips / JKLC Offline Trips, which share the same underlying `mtr`
+    dataframe via .copy() elsewhere -- this runs on a separate copy right
+    before the MTR tab is written, so those other tabs are unaffected):
+      - "AT": True if the row's Vehicle No. appears anywhere in Device
+        Status (AT portal), else False.
+      - "Wheelsye": True if the row's Vehicle No. appears anywhere in
+        Master Entry Data (master durg), else False.
+    No date restriction on either -- plain vehicle-no. presence check
+    against the whole uploaded file, unlike build_durg_dispatch's "AT"/
+    "Wheels Eye" columns (which also filter by day and by GPS Provider
+    Name == WHEELSEYE) -- this is intentionally a simpler, broader check,
+    exactly as specified (not reusing that stricter definition).
+    """
+    df = mtr.copy()
+    at_vehicles = set(device_status["Vehicles"].astype(str))
+    wheelsye_vehicles = set(master_entry["Vehicle no."].astype(str))
+    df["AT"] = df["Vehicle No."].astype(str).isin(at_vehicles)
+    df["Wheelsye"] = df["Vehicle No."].astype(str).isin(wheelsye_vehicles)
+    return df
+
+
 def write_output(mtr, yesterday_completed, offline_trips, all_installation,
                  month_installation, month_tab_name, api_vehicles, summary,
                  data_date, output_path: Path):
@@ -838,8 +862,10 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
         month_tab_name, len(month_installation), durg_dispatch,
     )
 
+    mtr_tab = add_at_wheelsye_columns(mtr, device_status, master_entry)
+
     output_path = output_dir / f"JKLC_Daily_Tracking_Report_{data_date}.xlsx"
-    write_output(mtr, yesterday_completed, offline_trips, all_installation,
+    write_output(mtr_tab, yesterday_completed, offline_trips, all_installation,
                  month_installation, month_tab_name, api_vehicles, summary,
                  data_date, output_path)
     return output_path
