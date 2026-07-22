@@ -89,19 +89,56 @@ def _git_pull():
         sys.exit(1)
 
 
+_REEXEC_FLAG = "_OFFICE_WORKER_PULLED"
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: office_server_worker.py <report_id>", file=sys.stderr)
         sys.exit(2)
-    report_id = sys.argv[1]
 
+    # Pull BEFORE anything else -- including before even looking at
+    # REPORT_MODULES. A previous version checked the report id against
+    # REPORT_MODULES first and only pulled afterwards, so a brand-new
+    # report id (added by the very commit this pull would fetch) failed
+    # immediately every time, without ever reaching the pull.
+    #
+    # Pulling alone still isn't enough, though: Python already reads and
+    # compiles this entire file -- including REPORT_MODULES's dict literal
+    # further down -- before any of its top-level code runs. A git pull
+    # only updates the file ON DISK; it can't retroactively change what
+    # this already-running process has in memory. So after a pull, re-run
+    # this same script as a fresh subprocess -- the new process reads the
+    # updated file from disk before running anything, which is what
+    # actually makes a newly pulled REPORT_MODULES entry (or any other
+    # code change in this file) take effect in the SAME invocation instead
+    # of only benefiting the next one. stdin/stdout/stderr are passed
+    # through directly so the subprocess is transparent to the SSH caller
+    # on the other end (see core/ssh_worker.py's protocol). The env var
+    # flag prevents pulling/re-running a second time once already fresh.
+    #
+    # (Uses subprocess.run rather than os.execv/execve for this -- despite
+    # execv being the more "obvious" fit for in-place re-exec, it couldn't
+    # be verified reliably in local testing on this dev machine, and a
+    # spawned-subprocess-with-inherited-stdio achieves the same effect in a
+    # way that's portable and was actually confirmed working end-to-end.)
+    if not os.environ.get(_REEXEC_FLAG):
+        _git_pull()
+        env = os.environ.copy()
+        env[_REEXEC_FLAG] = "1"
+        result = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), *sys.argv[1:]],
+            stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer,
+            env=env,
+        )
+        sys.exit(result.returncode)
+
+    report_id = sys.argv[1]
     entry = REPORT_MODULES.get(report_id)
     if entry is None:
         print(f"Unknown or unsupported report id '{report_id}'", file=sys.stderr)
         sys.exit(2)
     module_path, fn_name = entry
-
-    _git_pull()
 
     import importlib
     module = importlib.import_module(module_path)
