@@ -47,8 +47,13 @@ doc for the original evidence trail):
      day), check Date = Date + 1 (the day the review ran). The only 2
      columns in the 111-column Base tab not already in Yesterday Completed
      Trips.
-  5. Summary tab: carried forward UNCHANGED -- its aggregation logic was
-     not part of this validation and is out of scope here.
+  5. Summary tab: carried forward, PLUS a new blank date-block appended
+     for this run's report_date (see _add_summary_date_block) -- confirmed
+     Summary is a manual data-entry table (Khagash types in her own daily
+     counts per date-block by hand), not computed from Base, so this only
+     scaffolds a new block ready for her to fill in; it doesn't compute
+     the actual counts. Idempotent -- re-running for a date that already
+     has a block does nothing extra.
 
 INDEPENDENTLY RE-VERIFIED (not just taking the provided script/doc's word
 for it): reconstructed a synthetic "previous" tracker by removing the real
@@ -246,6 +251,69 @@ DEFAULT_COL_WIDTH = 13.0
 TEXT_FORMAT_COLUMNS = {"Transporter Number"}
 
 
+def _add_summary_date_block(wb, report_date: pd.Timestamp):
+    """Appends a new 5-column date-block to the Summary tab for
+    `report_date` -- confirmed cell-by-cell against real data spanning ~30
+    existing blocks that Summary is a MANUAL data-entry table (Khagash
+    types in her own daily counts by hand), not something computed from
+    Base -- so this only scaffolds a new block ready for her to fill in,
+    matching the real file's exact repeating structure:
+      - Row 1 ("Spoc"): "Khagash" in the block's first column only.
+      - Row 2 ("Date Of Reporting"): report_date in the block's first
+        column only.
+      - Row 3 ("Plant Name"): Surat / Cuttack / Durg / Jharli / Grand Total
+        headers across all 5 columns.
+      - Rows 4-14 (the metric rows): Surat/Cuttack/Durg/Jharli cells left
+        BLANK for manual entry; Grand Total column gets a formula summing
+        the other 4 (confirmed exact reference order from real cells, e.g.
+        "=E4+D4+C4+B4" -- Jharli+Durg+Cuttack+Surat, right-to-left).
+      - Row 15 ("% of Deviation"): literal 1 in all 5 columns (matches
+        real file -- every existing cell here is a hardcoded 1, not a
+        formula, in every block checked).
+
+    Idempotent: if a block for this exact date already exists anywhere in
+    Summary, does nothing -- re-running for the same date (e.g. a
+    same-day correction re-run) doesn't duplicate columns.
+    """
+    if "Summary" not in wb.sheetnames:
+        return
+    ws = wb["Summary"]
+    max_col = ws.max_column
+
+    for start_col in range(2, max_col + 1, 5):
+        existing = ws.cell(2, start_col).value
+        if existing is not None:
+            try:
+                if pd.Timestamp(existing).normalize() == report_date.normalize():
+                    return
+            except (ValueError, TypeError):
+                pass
+
+    new_start = max_col + 1 if max_col >= 2 else 2
+    surat_c, cuttack_c, durg_c, jharli_c, total_c = range(new_start, new_start + 5)
+
+    ws.cell(1, surat_c, "Khagash")
+    ws.cell(2, surat_c, report_date.to_pydatetime())
+    for c, label in zip((surat_c, cuttack_c, durg_c, jharli_c, total_c),
+                         ("Surat", "Cuttack", "Durg", "Jharli", "Grand Total")):
+        ws.cell(3, c, label)
+
+    surat_l, cuttack_l, durg_l, jharli_l = (
+        get_column_letter(c) for c in (surat_c, cuttack_c, durg_c, jharli_c)
+    )
+    for r in range(4, 15):
+        ws.cell(r, total_c, f"={jharli_l}{r}+{durg_l}{r}+{cuttack_l}{r}+{surat_l}{r}")
+    for c in (surat_c, cuttack_c, durg_c, jharli_c, total_c):
+        ws.cell(15, c, 1)
+
+    if new_start > 2:
+        prev_start = new_start - 5
+        for offset in range(5):
+            prev_dim = ws.column_dimensions.get(get_column_letter(prev_start + offset))
+            if prev_dim and prev_dim.width:
+                ws.column_dimensions[get_column_letter(new_start + offset)].width = prev_dim.width
+
+
 def _write_base_sheet(wb, df: pd.DataFrame):
     ws = wb.create_sheet("Base", 0)
     columns = list(df.columns)
@@ -311,6 +379,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     if "Base" in wb.sheetnames:
         del wb["Base"]
     _write_base_sheet(wb, full_base)  # create_sheet(..., 0) already places it first
+    _add_summary_date_block(wb, report_date)
 
     output_path = output_dir / f"Control_Tower_Tracker_{report_date_str}.xlsx"
     wb.save(output_path)
@@ -376,7 +445,9 @@ register(
             "D+letter prefix (confirmed broader than the original brief's 'DG/DD only' wording). HIT "
             "classification stays fully manual (confirmed no computable pattern). Validated exact "
             "against real data: 80/80 rows, identical INVNO sets, 0 unexpected diffs across all 111 "
-            "columns. Summary tab is carried forward unchanged, not regenerated."
+            "columns. Summary tab is a manual data-entry table (per-date column blocks Khagash fills "
+            "in by hand) -- carried forward, plus a new blank block scaffolded for this run's date "
+            "(labels, Grand Total formula) ready for manual entry; the actual counts aren't computed."
         ),
     )
 )
