@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 Office-server worker -- runs a report's normal, unchanged `process()`
-pipeline on this machine instead of on the hosted (Render) instance, for
-reports whose files are too large for the free tier's RAM (currently
-Report 6 / Battery Disconnection Mail Creation).
+pipeline on this machine instead of on the hosted (Render) instance, so
+report generation uses this server's CPU/RAM instead of Render's free
+tier. Covers all 6 currently-implemented reports (see REPORT_MODULES
+below); each report's own `process()` logic is completely untouched --
+only where it executes changes.
 
 Invoked fresh over SSH, once per report generation -- NOT a standing
 service. Reuses the exact same `reports.<module>.process()` function the
@@ -65,7 +67,13 @@ sys.path.insert(0, str(REPO_DIR / "app"))
 # entry-point function to call. Add an entry here for any other report you
 # offload later -- no other changes needed in this file.
 REPORT_MODULES = {
+    "1": ("reports.report_1_daily_tracker", "process"),
+    "2": ("reports.report_2_live_detention", "process"),
+    "3": ("reports.report_3_daily_tracking", "process"),
+    "4": ("reports.report_4_battery_disconnected", "process"),
+    "5": ("reports.report_5_at_fix_ontrip", "process"),
     "6": ("reports.report_6_battery_disconnection_mail", "process"),
+    "7": ("reports.report_7_control_tower_tracker", "process"),
 }
 
 

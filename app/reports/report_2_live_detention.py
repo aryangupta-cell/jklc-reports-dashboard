@@ -422,6 +422,22 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     return _write_plant_outputs_zip(summary, date_label, output_dir)
 
 
+def process_dispatch(input_files: dict, dates: dict, output_dir: Path) -> Path:
+    """Entry point wired into the registry below. Offloads to the office
+    server over SSH when SSH_HOST is configured (see core/ssh_worker.py +
+    office_server_worker.py at the repo root), so this report also runs on
+    the office server's CPU/RAM instead of Render's. With no office server
+    configured (the default), falls straight through to the same
+    `process()` above unchanged -- no change to this report's actual logic
+    or output, just where it executes.
+    """
+    from core.ssh_worker import is_configured, run_remote
+
+    if is_configured():
+        return run_remote("2", input_files, dates, output_dir)
+    return process(input_files, dates, output_dir)
+
+
 register(
     ReportMeta(
         id="2",
@@ -447,7 +463,7 @@ register(
             ),
         ],
         output_pattern="JKLC_Live_Detention_<start>_to_<end>.zip (4 plant .xlsx files, Summary tab only)",
-        process_fn=process,
+        process_fn=process_dispatch,
         implemented=True,
         date_mode="range",
         notes=(

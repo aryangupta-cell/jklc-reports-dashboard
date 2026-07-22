@@ -369,6 +369,22 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     return output_path
 
 
+def process_dispatch(input_files: dict, dates: dict, output_dir: Path) -> Path:
+    """Entry point wired into the registry below. Offloads to the office
+    server over SSH when SSH_HOST is configured (see core/ssh_worker.py +
+    office_server_worker.py at the repo root), so this report also runs on
+    the office server's CPU/RAM instead of Render's. With no office server
+    configured (the default), falls straight through to the same
+    `process()` above unchanged -- no change to this report's actual logic
+    or output, just where it executes.
+    """
+    from core.ssh_worker import is_configured, run_remote
+
+    if is_configured():
+        return run_remote("5", input_files, dates, output_dir)
+    return process(input_files, dates, output_dir)
+
+
 register(
     ReportMeta(
         id="5",
@@ -389,7 +405,7 @@ register(
         ],
         output_pattern="JKLC_AT_Fix_Ontrip_Vehicles_Status_<date>.xlsx (Sheet1 filtered/reordered data, "
                       "Sheet2 plant/transporter pivot)",
-        process_fn=process,
+        process_fn=process_dispatch,
         implemented=True,
         date_mode="single",
         notes=(

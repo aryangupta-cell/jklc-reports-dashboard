@@ -680,12 +680,12 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
 
 def process_dispatch(input_files: dict, dates: dict, output_dir: Path) -> Path:
     """Entry point wired into the registry below. Offloads to the office
-    server over SSH when OFFICE_SERVER_HOST is configured (see
-    core/ssh_worker.py + office_server_worker.py at the repo root) -- this
-    report's write step is the one that has repeatedly OOM'd/timed out on
-    Render's free tier (see notes above). With no office server configured
-    (the default), falls straight through to the same `process()` above
-    unchanged, so local dev/testing behaves exactly as it always has.
+    server over SSH when SSH_HOST is configured (see core/ssh_worker.py +
+    office_server_worker.py at the repo root) -- this report's write step
+    is the one that has repeatedly OOM'd/timed out on Render's free tier
+    (see notes above). With no office server configured (the default),
+    falls straight through to the same `process()` above unchanged, so
+    local dev/testing behaves exactly as it always has.
     """
     from core.ssh_worker import is_configured, run_remote
 
