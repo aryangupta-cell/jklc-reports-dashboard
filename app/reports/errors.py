@@ -25,3 +25,20 @@ def describe_column_mismatch(actual_columns, expected_columns, filename: str):
     if extra:
         parts.append(f"unexpected extra columns: {extra}")
     return f"'{filename}' has a column mismatch -- " + "; ".join(parts) + "."
+
+
+def describe_missing_columns(actual_columns, required_columns, filename: str):
+    """Like describe_column_mismatch, but only flags MISSING columns --
+    extra columns beyond `required_columns` are fine. Use this instead of
+    describe_column_mismatch whenever a file's actual full column set
+    isn't confirmed exhaustive/stable (e.g. only a handful of columns are
+    read by name out of a much larger real export, or the export format
+    has changed over time) -- describe_column_mismatch's stricter "no
+    unexpected extras" check will reject perfectly valid real files in
+    that case. (Confirmed the hard way: an API Vehicles export legitimately
+    lacked 2 columns a docstring had assumed were always present but the
+    code never actually used, which the stricter check rejected.)"""
+    missing = sorted(set(required_columns) - set(actual_columns))
+    if not missing:
+        return None
+    return f"'{filename}' is missing required columns: {missing}."

@@ -37,7 +37,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-from reports.errors import ReportProcessingError, describe_column_mismatch
+from reports.errors import ReportProcessingError, describe_missing_columns
 from reports.registry import InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -82,7 +82,14 @@ SUMMARY_INCLUDE_REMARKS = ["Detention"]
 # Exact raw column schema of the Detention Bot's output CSV (per the
 # original process() error message, which already named these 4 columns
 # explicitly): trip_id, remark, status, error.
-BOT_OUTPUT_COLS = ["trip_id", "remark", "status", "error"]
+# Only the columns actually read below (bot_output["status"]/["trip_id"]/
+# ["remark"]) -- not the bot's full output schema, which may include other
+# columns (e.g. "error") this code has never needed. Uses
+# describe_missing_columns (missing-only, tolerant of extras) rather than
+# a stricter exact-match check for the same reason Report 3's API Vehicles
+# check was relaxed: assuming a fixed full schema for a file this code
+# only reads a few columns from risks rejecting legitimate real files.
+BOT_OUTPUT_REQUIRED_COLS = ["trip_id", "remark", "status"]
 
 SUMMARY_COLUMNS = [
     "Plant Name", "Invoice Number", "Quantity", "Distribution Channel",
@@ -388,7 +395,7 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     mtr_raw = _read_any(mtr_path)
     dispatch_raw = _read_any(dispatch_path)
     bot_output = _read_any(bot_path)
-    mismatch = describe_column_mismatch(bot_output.columns, BOT_OUTPUT_COLS, bot_path.name)
+    mismatch = describe_missing_columns(bot_output.columns, BOT_OUTPUT_REQUIRED_COLS, bot_path.name)
     if mismatch:
         raise ReportProcessingError(
             f"{mismatch} Check you uploaded the Detention Bot's output CSV."

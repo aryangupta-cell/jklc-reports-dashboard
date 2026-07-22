@@ -103,7 +103,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from reports._report3_col_widths_mtr import MTR_FAMILY_COL_WIDTHS, ALL_INSTALLATION_COL_WIDTHS
-from reports.errors import ReportProcessingError, describe_column_mismatch
+from reports.errors import ReportProcessingError, describe_missing_columns
 from reports.registry import ExtraNumberField, InputSlot, ReportMeta, register
 
 log = logging.getLogger(__name__)
@@ -215,11 +215,15 @@ def _load_master_entry_data(path: Path) -> pd.DataFrame:
         raise ReportProcessingError(f"Couldn't read Master Entry Data '{path.name}': {exc}") from exc
 
 
-# Exact raw column schema of the API Vehicles export (per the confirmed
-# finding in clean_api_vehicles()'s docstring below: the raw file has these
-# 6 columns -- fname, transporter_name, regno, apiprovider, addtime,
-# modified_time).
-API_VEHICLES_RAW_COLS = ["fname", "transporter_name", "regno", "apiprovider", "addtime", "modified_time"]
+# Only the columns clean_api_vehicles() below actually reads -- NOT the
+# export's full column set. A stricter "exactly these columns" check was
+# tried first (per a docstring claiming the raw file always has exactly 6
+# columns: these 4 plus transporter_name/modified_time) but that broke on
+# a real production file that legitimately lacked those 2 unused columns --
+# confirmed the export's real-world schema isn't as fixed as assumed, and
+# the code never needed them anyway (see clean_api_vehicles's docstring:
+# they're explicitly dropped, not just unused here).
+API_VEHICLES_REQUIRED_COLS = ["fname", "regno", "apiprovider", "addtime"]
 
 
 def _load_api_vehicles(path: Path) -> pd.DataFrame:
@@ -227,7 +231,7 @@ def _load_api_vehicles(path: Path) -> pd.DataFrame:
         df = pd.read_csv(path, dtype=str)
     except Exception as exc:
         raise ReportProcessingError(f"Couldn't read API Vehicles file '{path.name}': {exc}") from exc
-    mismatch = describe_column_mismatch(df.columns, API_VEHICLES_RAW_COLS, path.name)
+    mismatch = describe_missing_columns(df.columns, API_VEHICLES_REQUIRED_COLS, path.name)
     if mismatch:
         raise ReportProcessingError(f"{mismatch} Check you uploaded the raw API Vehicles export.")
     return df
