@@ -256,11 +256,21 @@ def _compute_plant_metrics(plant_label: str, g: pd.DataFrame, not_created: int) 
     tracked_pct = tracked / track_total if track_total else None
     untracked_pct = untracked / track_total if track_total else None
 
-    at_fix = (gc_["Mode"] == "AT FIX").sum()
-    sim = (gc_["Mode"] == "SIM").sum()
-    mode_base = at_fix + sim
-    at_fix_pct = at_fix / mode_base if mode_base else None
-    sim_pct = sim / mode_base if mode_base else None
+    # AT FIX / Sim % must be "of the TRACKED devices", so BOTH the count
+    # and the denominator need to be scoped to TRACKED rows -- not just the
+    # denominator. The previous version counted at_fix/sim over ALL
+    # completed rows (gc_, tracked+untracked together) while dividing by
+    # `tracked` alone: on one real file this coincidentally matched (every
+    # tracked row happened to have Mode AT FIX/SIM, no untracked row ever
+    # did), producing believable output purely by luck. A second real file
+    # exposed the actual bug -- an UNTRACKED row with Mode "AT FIX" still
+    # got counted in the numerator, pushing the "percentage" past 100%
+    # (e.g. Durg came out to 101.6%), which is what caught this.
+    gc_tracked = gc_[gc_["Track Status"] == "TRACKED"]
+    at_fix = (gc_tracked["Mode"] == "AT FIX").sum()
+    sim = (gc_tracked["Mode"] == "SIM").sum()
+    at_fix_pct = at_fix / tracked if tracked else None
+    sim_pct = sim / tracked if tracked else None
 
     health_80 = (gc_["Remarks"] == 80).sum()
     health_90 = (gc_["Remarks"] == 90).sum()
