@@ -344,6 +344,7 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
         cell = ws.cell(3, c, label)
         cell.font = _SUMMARY_SPOC_FONT
         cell.alignment = _SUMMARY_TOP_CENTER
+        cell.border = _SUMMARY_THIN_BORDER
 
     surat_l, cuttack_l, durg_l, jharli_l = (
         get_column_letter(c) for c in (surat_c, cuttack_c, durg_c, jharli_c)
@@ -358,14 +359,17 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
             cell = ws.cell(r, c, 0)
             cell.font = _SUMMARY_SPOC_FONT
             cell.alignment = _SUMMARY_TOP_CENTER
+            cell.border = _SUMMARY_THIN_BORDER
         total_cell = ws.cell(r, total_c, f"={jharli_l}{r}+{durg_l}{r}+{cuttack_l}{r}+{surat_l}{r}")
         total_cell.font = _SUMMARY_SPOC_FONT
         total_cell.alignment = _SUMMARY_TOP_CENTER
+        total_cell.border = _SUMMARY_THIN_BORDER
     for c in block_cols:
         cell = ws.cell(15, c, 1)
         cell.font = _SUMMARY_SPOC_FONT
         cell.alignment = _SUMMARY_TOP_CENTER
         cell.number_format = "0%"
+        cell.border = _SUMMARY_THIN_BORDER
 
     if new_start > 2:
         prev_start = new_start - 5
