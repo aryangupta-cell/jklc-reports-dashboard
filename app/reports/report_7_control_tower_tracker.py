@@ -251,6 +251,13 @@ DEFAULT_COL_WIDTH = 13.0
 TEXT_FORMAT_COLUMNS = {"Transporter Number"}
 
 
+_SUMMARY_SPOC_FONT = Font(name="Arial", size=12, bold=True)
+_SUMMARY_SPOC_FILL = PatternFill(fill_type="solid", fgColor="D9E1F2")
+_SUMMARY_DATE_FILL = PatternFill(fill_type="solid", fgColor="FFE699")
+_SUMMARY_TOP_CENTER = Alignment(horizontal="center", vertical="top")
+_SUMMARY_THIN_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+
 def _add_summary_date_block(wb, report_date: pd.Timestamp):
     """Appends a new 5-column date-block to the Summary tab for
     `report_date` -- confirmed cell-by-cell against real data spanning ~30
@@ -258,18 +265,20 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
     types in her own daily counts by hand), not something computed from
     Base -- so this only scaffolds a new block ready for her to fill in,
     matching the real file's exact repeating structure:
-      - Row 1 ("Spoc"): "Khagash" in the block's first column only.
-      - Row 2 ("Date Of Reporting"): report_date in the block's first
-        column only.
+      - Row 1 ("Spoc"): "Khagash", Arial 12 bold, light-blue (D9E1F2) fill,
+        thin border, center/top aligned -- first column of the block only.
+      - Row 2 ("Date Of Reporting"): report_date, same font/border/align,
+        yellow (FFE699) fill, "d-mmm-yy" number format -- first column only.
       - Row 3 ("Plant Name"): Surat / Cuttack / Durg / Jharli / Grand Total
-        headers across all 5 columns.
+        headers across all 5 columns, same font/align, no fill/border.
       - Rows 4-14 (the metric rows): Surat/Cuttack/Durg/Jharli cells left
         BLANK for manual entry; Grand Total column gets a formula summing
         the other 4 (confirmed exact reference order from real cells, e.g.
-        "=E4+D4+C4+B4" -- Jharli+Durg+Cuttack+Surat, right-to-left).
-      - Row 15 ("% of Deviation"): literal 1 in all 5 columns (matches
-        real file -- every existing cell here is a hardcoded 1, not a
-        formula, in every block checked).
+        "=E4+D4+C4+B4" -- Jharli+Durg+Cuttack+Surat, right-to-left); same
+        font/align on every cell, no fill/border.
+      - Row 15 ("% of Deviation"): literal 1 in all 5 columns, "0%" number
+        format (matches real file -- every existing cell here is a
+        hardcoded 1, not a formula, in every block checked).
 
     Idempotent: if a block for this exact date already exists anywhere in
     Summary, does nothing -- re-running for the same date (e.g. a
@@ -291,20 +300,42 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
 
     new_start = max_col + 1 if max_col >= 2 else 2
     surat_c, cuttack_c, durg_c, jharli_c, total_c = range(new_start, new_start + 5)
+    block_cols = (surat_c, cuttack_c, durg_c, jharli_c, total_c)
 
-    ws.cell(1, surat_c, "Khagash")
-    ws.cell(2, surat_c, report_date.to_pydatetime())
-    for c, label in zip((surat_c, cuttack_c, durg_c, jharli_c, total_c),
-                         ("Surat", "Cuttack", "Durg", "Jharli", "Grand Total")):
-        ws.cell(3, c, label)
+    spoc_cell = ws.cell(1, surat_c, "Khagash")
+    spoc_cell.font = _SUMMARY_SPOC_FONT
+    spoc_cell.fill = _SUMMARY_SPOC_FILL
+    spoc_cell.border = _SUMMARY_THIN_BORDER
+    spoc_cell.alignment = _SUMMARY_TOP_CENTER
+
+    date_cell = ws.cell(2, surat_c, report_date.to_pydatetime())
+    date_cell.font = _SUMMARY_SPOC_FONT
+    date_cell.fill = _SUMMARY_DATE_FILL
+    date_cell.border = _SUMMARY_THIN_BORDER
+    date_cell.alignment = _SUMMARY_TOP_CENTER
+    date_cell.number_format = "d-mmm-yy"
+
+    for c, label in zip(block_cols, ("Surat", "Cuttack", "Durg", "Jharli", "Grand Total")):
+        cell = ws.cell(3, c, label)
+        cell.font = _SUMMARY_SPOC_FONT
+        cell.alignment = _SUMMARY_TOP_CENTER
 
     surat_l, cuttack_l, durg_l, jharli_l = (
         get_column_letter(c) for c in (surat_c, cuttack_c, durg_c, jharli_c)
     )
     for r in range(4, 15):
-        ws.cell(r, total_c, f"={jharli_l}{r}+{durg_l}{r}+{cuttack_l}{r}+{surat_l}{r}")
-    for c in (surat_c, cuttack_c, durg_c, jharli_c, total_c):
-        ws.cell(15, c, 1)
+        for c in (surat_c, cuttack_c, durg_c, jharli_c):
+            cell = ws.cell(r, c)
+            cell.font = _SUMMARY_SPOC_FONT
+            cell.alignment = _SUMMARY_TOP_CENTER
+        total_cell = ws.cell(r, total_c, f"={jharli_l}{r}+{durg_l}{r}+{cuttack_l}{r}+{surat_l}{r}")
+        total_cell.font = _SUMMARY_SPOC_FONT
+        total_cell.alignment = _SUMMARY_TOP_CENTER
+    for c in block_cols:
+        cell = ws.cell(15, c, 1)
+        cell.font = _SUMMARY_SPOC_FONT
+        cell.alignment = _SUMMARY_TOP_CENTER
+        cell.number_format = "0%"
 
     if new_start > 2:
         prev_start = new_start - 5
