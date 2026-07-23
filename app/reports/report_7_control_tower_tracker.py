@@ -324,8 +324,13 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
         get_column_letter(c) for c in (surat_c, cuttack_c, durg_c, jharli_c)
     )
     for r in range(4, 15):
+        # Literal 0, not blank -- every real block shows zero-counts as an
+        # explicit "0", never an empty cell (confirmed against a real
+        # corrected reference copy). Functionally identical to the Grand
+        # Total formula either way (SUM treats blank as 0 too), but this
+        # matches what Khagash's own blocks look like visually.
         for c in (surat_c, cuttack_c, durg_c, jharli_c):
-            cell = ws.cell(r, c)
+            cell = ws.cell(r, c, 0)
             cell.font = _SUMMARY_SPOC_FONT
             cell.alignment = _SUMMARY_TOP_CENTER
         total_cell = ws.cell(r, total_c, f"={jharli_l}{r}+{durg_l}{r}+{cuttack_l}{r}+{surat_l}{r}")
@@ -340,9 +345,16 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
     if new_start > 2:
         prev_start = new_start - 5
         for offset in range(5):
-            prev_dim = ws.column_dimensions.get(get_column_letter(prev_start + offset))
+            prev_letter = get_column_letter(prev_start + offset)
+            prev_dim = ws.column_dimensions.get(prev_letter)
             if prev_dim and prev_dim.width:
                 ws.column_dimensions[get_column_letter(new_start + offset)].width = prev_dim.width
+            # Collapse the block that was previously the newest -- matches
+            # the real file's own convention (confirmed against a real
+            # corrected reference copy): only the latest block stays
+            # visible by default, older ones are folded away but still
+            # there (un-hide manually in Excel if you need to look back).
+            ws.column_dimensions[prev_letter].hidden = True
 
 
 def _write_base_sheet(wb, df: pd.DataFrame):
