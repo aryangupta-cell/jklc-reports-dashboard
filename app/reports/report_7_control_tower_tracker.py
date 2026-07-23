@@ -302,16 +302,41 @@ def _add_summary_date_block(wb, report_date: pd.Timestamp):
     surat_c, cuttack_c, durg_c, jharli_c, total_c = range(new_start, new_start + 5)
     block_cols = (surat_c, cuttack_c, durg_c, jharli_c, total_c)
 
+    last_col_letter = get_column_letter(new_start + 4)
+    first_col_letter = get_column_letter(new_start)
+
     spoc_cell = ws.cell(1, surat_c, "Khagash")
+    date_cell = ws.cell(2, surat_c, report_date.to_pydatetime())
+
+    # Every real block merges the Spoc/Date Of Reporting cells across all 5
+    # columns (e.g. "B1:F1") -- this was missing entirely before, which is
+    # why the date showed as "######" (crammed into one narrow column
+    # instead of the merged 5-column width) and the border only ever
+    # touched the single first cell instead of the whole visual block.
+    #
+    # Merge FIRST, then style every cell in the range -- verified this
+    # exact order in isolation: merging first and then assigning border to
+    # each cell (including the now-MergedCell ones) correctly persists a
+    # proper box border through save/reload, with each cell keeping only
+    # the side(s) relevant to its position (e.g. a middle cell keeps just
+    # its "top" side). Doing it the other way around (style, then merge)
+    # silently discards the styling on every cell except the top-left --
+    # confirmed by testing both orders directly, not assumed.
+    ws.merge_cells(f"{first_col_letter}1:{last_col_letter}1")
+    ws.merge_cells(f"{first_col_letter}2:{last_col_letter}2")
+
+    for c in block_cols:
+        cell1 = ws.cell(1, c)
+        cell1.border = _SUMMARY_THIN_BORDER
+        cell1.fill = _SUMMARY_SPOC_FILL
+        cell2 = ws.cell(2, c)
+        cell2.border = _SUMMARY_THIN_BORDER
+        cell2.fill = _SUMMARY_DATE_FILL
+
     spoc_cell.font = _SUMMARY_SPOC_FONT
-    spoc_cell.fill = _SUMMARY_SPOC_FILL
-    spoc_cell.border = _SUMMARY_THIN_BORDER
     spoc_cell.alignment = _SUMMARY_TOP_CENTER
 
-    date_cell = ws.cell(2, surat_c, report_date.to_pydatetime())
     date_cell.font = _SUMMARY_SPOC_FONT
-    date_cell.fill = _SUMMARY_DATE_FILL
-    date_cell.border = _SUMMARY_THIN_BORDER
     date_cell.alignment = _SUMMARY_TOP_CENTER
     date_cell.number_format = "d-mmm-yy"
 
