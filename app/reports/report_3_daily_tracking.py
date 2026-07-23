@@ -818,13 +818,19 @@ def write_output(mtr, yesterday_completed, offline_trips, all_installation,
 # ---------------------------------------------------------------------------
 
 def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
-    # start_date/end_date range, matching Reports 1 & 2's UI. end_date IS
-    # data_date -- the day whose data this report covers (Yesterday
-    # Completed Trips, Durg Dispatch, Offline Trips window end, Last Day
-    # AT Installation all key off it -- see module docstring's convention
-    # correction). start_date only bounds the MTR tab's own date filter.
+    # start_date/end_date range, matching Reports 1 & 2's UI. End Date is
+    # "today" (the day you're running the report / pulling files) -- the
+    # actual DATA_DATE this report covers (Yesterday Completed Trips'
+    # default, Durg Dispatch, both 5-day window ends, Last Day AT
+    # Installation) is End Date MINUS ONE DAY. CORRECTED per explicit,
+    # repeated instruction with a worked example (enter End Date=22 ->
+    # Last Day AT Installation/Durg Dispatch use 21, 5-day windows are
+    # 17-21 not 18-22) -- an earlier version treated End Date AS data_date
+    # directly with no offset, which this replaces. start_date only bounds
+    # the MTR tab's own raw date filter and is NOT shifted.
     start_date = dates["start_date"]
-    data_date = dates["end_date"]
+    end_date_entered = dates["end_date"]
+    data_date = (pd.Timestamp(end_date_entered) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     # Optional, defaults to 1 (today's existing behavior, unchanged) -- see
     # build_yesterday_completed_trips's docstring. Only ever set higher for
     # late/catch-up runs; no other tab or report is affected by this value.
@@ -840,7 +846,11 @@ def process(input_files: dict, dates: dict, output_dir: Path) -> Path:
     api_vehicles = _load_api_vehicles(input_files["api_vehicles"])
 
     try:
-        mtr = clean_mtr(mtr_raw, start_date, data_date)
+        # MTR tab's own raw filter uses the literally-entered End Date, NOT
+        # the shifted data_date -- otherwise the MTR tab itself would lose
+        # a day's worth of rows (End Date's own data) that was never asked
+        # to be trimmed, only the specific Summary/tab computations below.
+        mtr = clean_mtr(mtr_raw, start_date, end_date_entered)
         yesterday_completed = build_yesterday_completed_trips(mtr, data_date, yesterday_days_back)
         offline_trips = build_offline_trips(mtr, offline_dashboard, data_date)
         all_installation = build_all_installation(device_status, dashboard)
@@ -917,23 +927,26 @@ register(
                 default=1,
                 min_value=1,
                 hint=(
-                    "1 = yesterday only (normal case, default). Higher = pulls that many days "
-                    "ending at End Date -- e.g. 3 covers the 3 days up to and including End Date, "
-                    "for late/catch-up runs. Only affects the Yesterday Completed Trips tab; every "
-                    "other tab is unaffected."
+                    "1 = yesterday only (End Date minus 1 -- normal case, default). Higher = pulls "
+                    "that many days ending at End Date minus 1 -- e.g. entering End Date=22 and 3 "
+                    "here covers 21, 20, 19, for late/catch-up runs. Only affects the Yesterday "
+                    "Completed Trips tab; every other tab is unaffected."
                 ),
             ),
         ],
         notes=(
-            "End Date = the day this report covers (matches real filename exactly, e.g. enter "
-            "2026-07-12 for the '12th July' report). Start Date only bounds the MTR tab's own date "
-            "filter (previously MTR was passed through unfiltered). No cross-day accumulation. "
-            "Validated against the real 12th July file: All Installation, Offline Trips (251/206/45), "
-            "every AT-installation Summary metric, and Durg Dispatch (195 total, 163 AT-matched, "
-            "off by 1 on Wheelseye/No-GPS) all match almost exactly. Durg Dispatch is NOT deduped by "
-            "Vehicle No. despite the SOP text saying to -- confirmed the real report double-counts a "
-            "vehicle dispatched twice in a day. Deviation Backward/Forward differs from the real file "
-            "because it's a multi-day cumulative master (documented, not a bug)."
+            "End Date = TODAY (the day you're running this / pulling files), NOT the day the "
+            "report covers -- the report's actual data date (filename, Summary titles, Last Day AT "
+            "Installation, both 5-day windows, Durg Dispatch Status, Yesterday Completed Trips' "
+            "default) is End Date MINUS ONE DAY. E.g. enter 2026-07-22 to produce the "
+            "'21st July' report. Start Date only bounds the MTR tab's own raw date filter and is "
+            "NOT shifted. No cross-day accumulation. Validated against real reference files for "
+            "both 12th July and 21st/22nd July: All Installation, Offline Trips, every "
+            "AT-installation Summary metric, both 5-day windows, and Last Day AT Installation all "
+            "match exactly. Durg Dispatch is NOT deduped by Vehicle No. despite the SOP text saying "
+            "to -- confirmed the real report double-counts a vehicle dispatched twice in a day. "
+            "Deviation Backward/Forward differs from the real file because it's a multi-day "
+            "cumulative master (documented, not a bug)."
         ),
     )
 )
